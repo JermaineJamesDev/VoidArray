@@ -1,4 +1,4 @@
-rootProject.name = "EzTransfer"
+rootProject.name = "VoidArray"
 
 pluginManagement {
     repositories {

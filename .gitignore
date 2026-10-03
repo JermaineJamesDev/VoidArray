@@ -17,3 +17,8 @@ captures
 !*.xcworkspace/contents.xcworkspacedata
 **/xcshareddata/WorkspaceSettings.xcsettings
 node_modules/
+
+# Signing material must never be committed; CI receives it through repository secrets.
+*.jks
+*.keystore
+keystore.properties

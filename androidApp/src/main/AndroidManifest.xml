@@ -23,13 +23,13 @@
         which would make the two phones filter each other out as "self".
     -->
     <application
-        android:name=".EzTransferApplication"
+        android:name=".VoidArrayApplication"
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.EzTransfer">
+        android:theme="@style/Theme.VoidArray">
         <activity
             android:exported="true"
             android:launchMode="singleTop"

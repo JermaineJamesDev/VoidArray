@@ -1,23 +1,23 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Allows EzTransfer through Windows Defender Firewall on Private and Domain networks.
+    Allows VoidArray through Windows Defender Firewall on Private and Domain networks.
 
 .DESCRIPTION
     jpackage-built MSIs cannot create firewall rules, so this script is meant to run from an installer
     wrapper (Inno Setup [Run] entry, Conveyor, or similar) or manually once after installing.
 
-    Rules are scoped to the EzTransfer executable and to Private/Domain profiles only. Public networks stay
+    Rules are scoped to the VoidArray executable and to Private/Domain profiles only. Public networks stay
     blocked on purpose; the app warns the user to switch the network to Private instead.
 
 .PARAMETER ProgramPath
-    Full path to the installed EzTransfer.exe.
+    Full path to the installed VoidArray.exe.
 
 .PARAMETER Remove
     Deletes the rules instead of creating them (for uninstall).
 
 .EXAMPLE
-    .\add-firewall-rules.ps1 -ProgramPath "C:\Program Files\EzTransfer\EzTransfer.exe"
+    .\add-firewall-rules.ps1 -ProgramPath "C:\Program Files\VoidArray\VoidArray.exe"
 #>
 param(
     [Parameter(Mandatory = $true)][string]$ProgramPath,
@@ -26,7 +26,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $port = 53318
-$names = @('EzTransfer (TCP-In)', 'EzTransfer (UDP-In)')
+$names = @('VoidArray (TCP-In)', 'VoidArray (UDP-In)')
 
 # Recreate rather than update so re-running after an upgrade never leaves stale paths behind.
 foreach ($name in $names) {

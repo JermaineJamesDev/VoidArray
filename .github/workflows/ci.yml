@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Zulu matches the daemon JVM pinned in gradle/gradle-daemon-jvm.properties, so Gradle does not
+      # download a second JDK.
+      - uses: actions/setup-java@v6
+        with:
+          distribution: zulu
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      # The wrapper was committed from Windows without the executable bit.
+      - run: chmod +x gradlew
+
+      - name: Test and build
+        run: ./gradlew :engine:test :shared:jvmTest :desktopApp:compileKotlin :androidApp:assembleDebug
+
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports
+          path: '**/build/reports/tests/'

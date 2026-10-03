@@ -13,7 +13,7 @@ kotlin {
     jvm()
 
     android {
-       namespace = "com.yunjam.eztransfer.shared"
+       namespace = "io.github.jermainejamesdev.voidarray.shared"
        compileSdk = libs.versions.android.compileSdk.get().toInt()
        minSdk = libs.versions.android.minSdk.get().toInt()
 

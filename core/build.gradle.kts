@@ -17,7 +17,7 @@ kotlin {
     }
 
     android {
-        namespace = "com.yunjam.eztransfer.core"
+        namespace = "io.github.jermainejamesdev.voidarray.core"
         compileSdk = libs.versions.android.compileSdk.get().toInt()
         minSdk = libs.versions.android.minSdk.get().toInt()
 

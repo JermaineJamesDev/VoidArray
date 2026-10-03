@@ -1,0 +1,135 @@
+name: Release
+
+# Publishing a GitHub release tagged vX.Y.Z builds the signed Android APK and the Windows EXE and MSI
+# installers, then attaches them (with SHA-256 checksums) to that release. Running it manually builds the
+# same files as workflow artifacts without touching any release, which is useful for testing.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to build, as X.Y.Z
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  # Passed through env rather than interpolated into scripts so tag names cannot inject shell code.
+  RAW_VERSION: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.version }}
+  RELEASE_TAG: ${{ github.event.release.tag_name }}
+
+jobs:
+  android:
+    name: Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: zulu
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - run: chmod +x gradlew
+
+      - name: Resolve version
+        run: |
+          version="${RAW_VERSION#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version must look like X.Y.Z (tag vX.Y.Z), got '$RAW_VERSION'"
+            exit 1
+          fi
+          echo "APP_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Decode signing keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::error::Repository secret ANDROID_KEYSTORE_BASE64 is missing. See docs/RELEASING.md."
+            exit 1
+          fi
+          echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.jks"
+          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+
+      - name: Build signed APK
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ./gradlew :androidApp:assembleRelease -PappVersion="$APP_VERSION"
+
+      - name: Collect APK
+        run: |
+          mkdir dist
+          cp androidApp/build/outputs/apk/release/androidApp-release.apk "dist/VoidArray-$APP_VERSION.apk"
+          # Fails the job if signing silently did not happen.
+          "$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)/apksigner" verify --print-certs "dist/VoidArray-$APP_VERSION.apk"
+          cd dist && sha256sum "VoidArray-$APP_VERSION.apk" > "VoidArray-$APP_VERSION.apk.sha256"
+
+      - name: Remove keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$RELEASE_TAG" dist/* --clobber
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: android-apk
+          path: dist/
+
+  windows:
+    name: Windows installers
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: zulu
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Resolve version
+        run: |
+          version="${RAW_VERSION#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version must look like X.Y.Z (tag vX.Y.Z), got '$RAW_VERSION'"
+            exit 1
+          fi
+          echo "APP_VERSION=$version" >> "$GITHUB_ENV"
+
+      # The non-"Release" packaging tasks skip ProGuard, which would need keep rules for Ktor and serialization.
+      - name: Build EXE and MSI
+        run: ./gradlew :desktopApp:packageExe :desktopApp:packageMsi -PappVersion="$APP_VERSION"
+
+      - name: Collect installers
+        run: |
+          mkdir dist
+          cp desktopApp/build/compose/binaries/main/exe/*.exe "dist/VoidArray-$APP_VERSION-setup.exe"
+          cp desktopApp/build/compose/binaries/main/msi/*.msi "dist/VoidArray-$APP_VERSION.msi"
+          cd dist
+          for file in *; do sha256sum "$file" > "$file.sha256"; done
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$RELEASE_TAG" dist/* --clobber
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-installers
+          path: dist/
