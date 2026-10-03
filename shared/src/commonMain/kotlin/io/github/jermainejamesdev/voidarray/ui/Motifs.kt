@@ -8,8 +8,10 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -32,6 +34,7 @@ import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import kotlin.math.PI
 import kotlin.math.cos
@@ -112,48 +115,79 @@ private fun DrawScope.drawFormation(angle: Float, line: Color, core: Color) {
 }
 
 /**
- * The pairing code set apart as a jade token, large enough to read aloud and compare across two screens,
- * since comparing it is what defeats a first-contact man in the middle.
+ * The pairing code set apart in jade, large enough to read aloud and compare across two screens, since
+ * comparing it is what defeats a first-contact man in the middle. Monospaced so the digits line up when
+ * the two screens are held side by side.
  */
 @Composable
-internal fun PairingCodeToken(code: String, caption: String, modifier: Modifier = Modifier) {
+internal fun PairingCodeToken(code: String, caption: String, modifier: Modifier = Modifier, header: (@Composable () -> Unit)? = null) {
     val scheme = MaterialTheme.colorScheme
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .border(1.dp, scheme.primary.copy(alpha = 0.6f), MaterialTheme.shapes.medium)
-            .padding(vertical = 12.dp, horizontal = 16.dp),
+            .border(1.dp, scheme.primary.copy(alpha = 0.55f), MaterialTheme.shapes.large)
+            .padding(vertical = 14.dp, horizontal = 16.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Text(caption, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant, textAlign = TextAlign.Center)
+        header?.invoke()
         Text(
             code,
-            fontFamily = MaterialTheme.typography.titleMedium.fontFamily,
-            fontWeight = FontWeight.Bold,
-            fontSize = 30.sp,
-            letterSpacing = 4.sp,
+            fontFamily = VoidArrayTheme.extras.mono,
+            fontWeight = FontWeight.Medium,
+            fontSize = 34.sp,
+            letterSpacing = 0.14.em,
+            color = scheme.primary,
+        )
+        Text(caption, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant, textAlign = TextAlign.Center)
+    }
+}
+
+/** The pairing code on one line, for a transfer row where space is short. */
+@Composable
+internal fun CompactPairingCode(code: String, modifier: Modifier = Modifier) {
+    val scheme = MaterialTheme.colorScheme
+    Row(
+        modifier = modifier
+            .border(1.dp, scheme.primary.copy(alpha = 0.55f), MaterialTheme.shapes.small)
+            .padding(horizontal = 14.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text(
+            "CONFIRM\nCODE",
+            style = MaterialTheme.typography.labelSmall,
+            color = scheme.onSurfaceVariant,
+            lineHeight = 13.sp,
+        )
+        Text(
+            code,
+            fontFamily = VoidArrayTheme.extras.mono,
+            fontWeight = FontWeight.Medium,
+            fontSize = 24.sp,
+            letterSpacing = 0.12.em,
             color = scheme.primary,
         )
     }
 }
 
-/** A tilted cinnabar seal, stamped on finished work. */
+/** A tilted gold seal, stamped on finished work. Gold rather than red so success never reads as an error. */
 @Composable
 internal fun SealStamp(text: String = "Sealed", modifier: Modifier = Modifier) {
-    val color = MaterialTheme.colorScheme.error
+    val color = MaterialTheme.colorScheme.secondary
     Box(
         modifier = modifier
-            .rotate(-8f)
-            .border(1.5.dp, color, MaterialTheme.shapes.extraSmall)
-            .padding(horizontal = 6.dp, vertical = 2.dp),
+            .rotate(-6f)
+            .border(1.5.dp, color)
+            .padding(horizontal = 7.dp, vertical = 4.dp),
     ) {
         Text(
             text.uppercase(),
             color = color,
-            fontFamily = MaterialTheme.typography.titleMedium.fontFamily,
+            fontFamily = MaterialTheme.typography.headlineSmall.fontFamily,
             fontWeight = FontWeight.Bold,
-            fontSize = 11.sp,
-            letterSpacing = 1.5.sp,
+            fontSize = 10.sp,
+            letterSpacing = 0.14.em,
         )
     }
 }

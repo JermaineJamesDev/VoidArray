@@ -4,8 +4,12 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
-/** Version 2 moved the API to HTTPS with SPKI-pinned certificates; version 1 peers cannot interoperate. */
-const val PROTOCOL_VERSION = 2
+/**
+ * Version 2 moved the API to HTTPS with SPKI-pinned certificates. Version 3 requires a client certificate
+ * on every request that changes state and derives the pairing code from committed per-transfer nonces.
+ * Peers on other versions cannot interoperate.
+ */
+const val PROTOCOL_VERSION = 3
 
 /** TCP port for the HTTP API and UDP port for discovery. Deliberately not LocalSend's 53317. */
 const val DEFAULT_PORT = 53318
@@ -19,6 +23,7 @@ const val MULTICAST_GROUP = "224.0.0.168"
 object Routes {
     const val INFO = "/api/v1/info"
     const val REGISTER = "/api/v1/register"
+    const val PAIR = "/api/v1/pair"
     const val PREPARE = "/api/v1/prepare"
     const val UPLOAD = "/api/v1/upload"
     const val CANCEL = "/api/v1/cancel"
@@ -67,12 +72,33 @@ data class FileMeta(
     val size: Long,
 )
 
+/**
+ * First half of the pairing-code exchange. The sender commits to a secret nonce before it learns the
+ * receiver's, so a man in the middle cannot pick keys or nonces that make the two displayed codes match.
+ */
+@Serializable
+data class PairRequest(
+    /** Hex SHA-256 binding the sender's fingerprint to its nonce; see pairingCommitment in the engine. */
+    val commitment: String,
+)
+
+@Serializable
+data class PairResponse(
+    val pairingId: String,
+    /** The receiver's nonce, hex. */
+    val nonce: String,
+)
+
 @Serializable
 data class PrepareRequest(
     val sender: DeviceInfo,
     val files: List<FileMeta>,
     /** Optional message or link sent along with (or instead of) files. */
     val text: String? = null,
+    /** From the [PairResponse] this offer completes. */
+    val pairingId: String,
+    /** The nonce committed to in the [PairRequest], revealed only after the receiver sent its own. */
+    val nonce: String,
 )
 
 /**

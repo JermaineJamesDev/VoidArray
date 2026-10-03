@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ContentResolver
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -154,7 +155,7 @@ class MainActivity : ComponentActivity() {
         if (uris.isEmpty()) return
         lifecycleScope.launch {
             val handles = withContext(Dispatchers.IO) {
-                uris.mapNotNull { ContentUriFileHandle.from(contentResolver, it) }
+                uris.filter(::isForeignContent).mapNotNull { ContentUriFileHandle.from(contentResolver, it) }
             }
             if (handles.size < uris.size) {
                 app.engine.notice("${uris.size - handles.size} item(s) could not be read and were skipped.")
@@ -162,6 +163,14 @@ class MainActivity : ComponentActivity() {
             app.engine.stage(handles)
         }
     }
+
+    /**
+     * Share intents come from any app, and VoidArray opens their URIs with its own permissions. A file://
+     * URI or one of this app's own content authorities could therefore point at its private files, such
+     * as the identity key, and get them sent to another device. Only other apps' content URIs are read.
+     */
+    private fun isForeignContent(uri: Uri): Boolean =
+        uri.scheme == ContentResolver.SCHEME_CONTENT && uri.authority?.startsWith(packageName) == false
 
     private companion object {
         // The scrim colors enableEdgeToEdge uses by default for three-button navigation.

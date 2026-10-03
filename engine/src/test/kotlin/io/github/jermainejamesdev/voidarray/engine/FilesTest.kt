@@ -24,6 +24,26 @@ class FilesTest {
     }
 
     @Test
+    fun sanitizeRemovesDirectionOverridesAndInvisibleCharacters() {
+        // Displayed as "photoexe.png" if the right-to-left override survived.
+        assertEquals("photognp.exe", sanitizeFileName("photo‮gnp.exe"))
+        assertEquals("ab.txt", sanitizeFileName("a​b\u0085.txt"))
+    }
+
+    @Test
+    fun sanitizeNeverProducesAPartialFileName() {
+        val partial = partialFileName("A".repeat(64), "x", 1)
+        assertEquals("_$partial", sanitizeFileName(partial))
+    }
+
+    @Test
+    fun aliasIsSingleLineVisibleAndBounded() {
+        assertEquals("Lab PC", sanitizeAlias("  Lab\n‮PC\t "))
+        assertEquals("Unnamed device", sanitizeAlias("​​"))
+        assertEquals(MAX_ALIAS_LENGTH, sanitizeAlias("x".repeat(500)).length)
+    }
+
+    @Test
     fun sanitizeKeepsExtensionWhenTruncating() {
         val result = sanitizeFileName("a".repeat(300) + ".jpeg")
         assertTrue(result.length <= 200)
@@ -39,11 +59,12 @@ class FilesTest {
     }
 
     @Test
-    fun partialNameDependsOnSenderNameAndSize() {
-        val base = partialFileName("device-a", "a.bin", 10)
-        assertEquals(base, partialFileName("device-a", "a.bin", 10))
-        assertNotEquals(base, partialFileName("device-b", "a.bin", 10))
-        assertNotEquals(base, partialFileName("device-a", "a.bin", 11))
+    fun partialNameDependsOnSenderKeyNameAndSize() {
+        val keyA = "A".repeat(64)
+        val base = partialFileName(keyA, "a.bin", 10)
+        assertEquals(base, partialFileName(keyA.lowercase(), "a.bin", 10))
+        assertNotEquals(base, partialFileName("B".repeat(64), "a.bin", 10))
+        assertNotEquals(base, partialFileName(keyA, "a.bin", 11))
         assertTrue(base.startsWith(".") && base.endsWith(".part"))
     }
 }

@@ -5,13 +5,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -19,35 +17,33 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import io.github.jermainejamesdev.voidarray.core.HistoryEntry
 import io.github.jermainejamesdev.voidarray.core.TransferDirection
 import io.github.jermainejamesdev.voidarray.core.TransferStatus
 
+/** The Clear action for the History screen's title row, with its confirmation. */
 @Composable
-internal fun HistoryHeader(hasEntries: Boolean, onClear: () -> Unit) {
+internal fun ClearHistoryAction(onClear: () -> Unit) {
     var confirming by remember { mutableStateOf(false) }
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("History", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-            if (hasEntries) TextButton(onClick = { confirming = true }) { Text("Clear") }
-        }
-        InkDivider(modifier = Modifier.widthIn(max = 220.dp))
-    }
+    QuietButton("Clear", onClick = { confirming = true })
     if (confirming) {
         AlertDialog(
             onDismissRequest = { confirming = false },
             title = { Text("Clear history?") },
             text = { Text("This removes the list of past transfers. Received files are not deleted.") },
             confirmButton = {
-                TextButton(onClick = {
+                QuietButton("Clear", onClick = {
                     confirming = false
                     onClear()
-                }) { Text("Clear") }
+                })
             },
-            dismissButton = { TextButton(onClick = { confirming = false }) { Text("Cancel") } },
+            dismissButton = { QuietButton("Cancel", onClick = { confirming = false }) },
         )
     }
 }
@@ -59,30 +55,31 @@ internal fun HistoryRow(entry: HistoryEntry, onCopy: (String) -> Unit, onOpenFol
     val succeeded = entry.status == TransferStatus.COMPLETED
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.medium,
+        shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(containerColor = scheme.surfaceContainerLow),
-        border = goldHairline(),
     ) {
-        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                IconBadge(
+        Column(modifier = Modifier.padding(start = 18.dp, top = 14.dp, end = 14.dp, bottom = 14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                IconTile(
                     icon = when {
                         !succeeded -> AppIcons.Warning
                         received -> AppIcons.Download
                         else -> AppIcons.Upload
                     },
-                    container = if (succeeded) scheme.secondaryContainer else scheme.errorContainer,
-                    content = if (succeeded) scheme.onSecondaryContainer else scheme.onErrorContainer,
+                    tone = if (succeeded) Tone.JADE else Tone.DANGER,
                 )
-                Column(modifier = Modifier.weight(1f)) {
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     val what = when {
-                        entry.fileCount == 0 -> "Message"
+                        entry.fileCount == 0 -> "message"
                         entry.fileCount == 1 -> entry.files.firstOrNull()?.name ?: "1 file"
                         else -> "${entry.fileCount} files"
                     }
                     Text(
-                        "${if (received) "From" else "To"} ${entry.peerAlias}: $what",
-                        fontWeight = FontWeight.SemiBold,
+                        buildAnnotatedString {
+                            append("${if (received) "From" else "To"} ${entry.peerAlias}")
+                            withStyle(SpanStyle(color = scheme.onSurfaceVariant, fontWeight = FontWeight.Normal)) { append(" · $what") }
+                        },
+                        style = MaterialTheme.typography.titleMedium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -90,10 +87,15 @@ internal fun HistoryRow(entry: HistoryEntry, onCopy: (String) -> Unit, onOpenFol
                         entry.finishedAtLabel,
                         entry.totalBytes.takeIf { it > 0 }?.let(::formatBytes),
                         if (succeeded) null else (entry.message ?: entry.status.name.lowercase()),
-                    ).joinToString("  ·  ")
-                    Text(details, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant, maxLines = 2)
+                    ).joinToString(" · ")
+                    Text(
+                        details,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (succeeded) scheme.onSurfaceVariant else scheme.error,
+                        maxLines = 2,
+                    )
                 }
-                if (succeeded) SealStamp()
+                if (succeeded) SealStamp(modifier = Modifier.padding(end = 4.dp))
             }
             if (entry.fileCount > 1) {
                 val names = entry.files.joinToString(", ") { it.name }
@@ -109,7 +111,7 @@ internal fun HistoryRow(entry: HistoryEntry, onCopy: (String) -> Unit, onOpenFol
             entry.text?.let { text -> MessageBox(text, onCopy = { onCopy(text) }) }
             if (received && succeeded && entry.fileCount > 0) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    TextButton(onClick = onOpenFolder) { Text("Open folder") }
+                    QuietButton("Open folder", onClick = onOpenFolder, icon = AppIcons.Folder)
                 }
             }
         }

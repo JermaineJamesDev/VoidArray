@@ -16,20 +16,31 @@ import java.net.InetSocketAddress
 import java.net.MulticastSocket
 import java.net.NetworkInterface
 import java.net.SocketException
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Semaphore
 
 /**
  * UDP discovery over link-local multicast with directed broadcast as a second channel, since some
  * access points drop one or the other. Peers are identified by the packet's source address, which is
  * the address that actually routes back to them, rather than by anything they claim in the payload.
+ *
+ * A UDP payload is only a hint: anyone can send one with any source address. Nothing here adds a peer;
+ * [onAnnouncement] must confirm it over pinned TLS first. Because each announcement costs an outbound
+ * connection to an address and port the packet chose, packets are filtered and rate limited before that.
  */
 internal class DiscoveryService(
     private val scope: CoroutineScope,
     private val selfInfo: () -> DeviceInfo,
-    private val onPeerSeen: (DeviceInfo, String) -> Unit,
-    /** Replies to an announcement over TCP; returns false so the caller can fall back to UDP. */
-    private val replyViaHttp: suspend (DeviceInfo, String) -> Boolean,
+    /**
+     * Verifies [DeviceInfo] at the address over TLS pinned to its claimed key, and replies over TCP when
+     * the sender asked for a reply. Returns false when the peer could not be reached, so a requested reply
+     * falls back to UDP.
+     */
+    private val onAnnouncement: suspend (info: DeviceInfo, address: String, replyRequested: Boolean) -> Boolean,
     private val log: (String) -> Unit,
 ) {
+    private val lastHandled = ConcurrentHashMap<String, Long>()
+    private val verifications = Semaphore(MAX_CONCURRENT_VERIFICATIONS)
     private val group: InetAddress = InetAddress.getByName(MULTICAST_GROUP)
     private val groupAddress = InetSocketAddress(group, 0)
     private var socket: MulticastSocket? = null
@@ -122,16 +133,35 @@ internal class DiscoveryService(
             }.getOrNull() ?: continue
             val self = selfInfo()
             if (announcement.info.deviceId == self.deviceId) continue
+            if (announcement.info.port !in 1..65535) continue
 
             val sender = packet.address
+            if (!isLocalNetworkPeer(sender)) continue
             val senderHost = sender.hostAddress ?: continue
-            onPeerSeen(announcement.info, senderHost)
-            if (announcement.announce) {
-                scope.launch {
-                    if (!replyViaHttp(announcement.info, senderHost)) replyViaUdp(sender)
+            if (!claimSlot(senderHost)) continue
+            if (!verifications.tryAcquire()) continue
+            scope.launch {
+                try {
+                    val reached = onAnnouncement(announcement.info, senderHost, announcement.announce)
+                    if (announcement.announce && !reached) replyViaUdp(sender)
+                } finally {
+                    verifications.release()
                 }
             }
         }
+    }
+
+    /** At most one announcement per source address per [MIN_INTERVAL_MILLIS]; repeats are dropped. */
+    private fun claimSlot(address: String): Boolean {
+        val now = System.currentTimeMillis()
+        if (lastHandled.size > MAX_TRACKED_ADDRESSES) {
+            lastHandled.entries.removeIf { now - it.value > MIN_INTERVAL_MILLIS }
+        }
+        var claimed = false
+        lastHandled.compute(address) { _, last ->
+            if (last != null && now - last < MIN_INTERVAL_MILLIS) last else now.also { claimed = true }
+        }
+        return claimed
     }
 
     private fun replyViaUdp(target: InetAddress) {
@@ -144,4 +174,11 @@ internal class DiscoveryService(
 
     private fun encode(announcement: Announcement): ByteArray =
         ProtocolJson.encodeToString(Announcement.serializer(), announcement).toByteArray()
+
+    private companion object {
+        // Multicast and broadcast deliver each announcement twice; the second copy lands well inside this.
+        const val MIN_INTERVAL_MILLIS = 3_000L
+        const val MAX_TRACKED_ADDRESSES = 512
+        const val MAX_CONCURRENT_VERIFICATIONS = 8
+    }
 }

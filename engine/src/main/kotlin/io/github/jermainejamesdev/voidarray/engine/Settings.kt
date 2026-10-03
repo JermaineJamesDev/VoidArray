@@ -2,6 +2,10 @@ package io.github.jermainejamesdev.voidarray.engine
 
 import io.github.jermainejamesdev.voidarray.core.ThemeMode
 import java.io.File
+import java.io.OutputStream
+import java.nio.file.FileSystems
+import java.nio.file.Files
+import java.nio.file.attribute.PosixFilePermissions
 import java.util.Properties
 import java.util.UUID
 
@@ -22,13 +26,7 @@ class PropertiesFileStore(private val file: File) : KeyValueStore {
     @Synchronized
     override fun put(key: String, value: String?) {
         if (value == null) properties.remove(key) else properties.setProperty(key, value)
-        file.parentFile?.mkdirs()
-        val temp = File(file.parentFile, file.name + ".tmp")
-        temp.outputStream().use { properties.store(it, null) }
-        if (!temp.renameTo(file)) {
-            file.delete()
-            temp.renameTo(file)
-        }
+        writeFileAtomically(file) { properties.store(it, null) }
     }
 }
 
@@ -65,6 +63,26 @@ class AppSettings(val store: KeyValueStore, private val defaultAlias: String) {
         const val KEY_AUTO_ACCEPT = "autoAcceptTrusted"
         const val KEY_THEME = "theme"
         const val KEY_TRAY = "minimizeToTray"
+    }
+}
+
+/**
+ * Replaces [target] with what [write] produces, through a temp file so a crash cannot truncate it. The
+ * settings, key and history files are private, so on filesystems with POSIX permissions the temp file is
+ * made owner-only before anything is written to it. Windows relies on the per-user ACL of %APPDATA%.
+ */
+internal fun writeFileAtomically(target: File, write: (OutputStream) -> Unit) {
+    target.parentFile?.mkdirs()
+    val temp = File(target.parentFile, target.name + ".tmp")
+    temp.delete()
+    temp.createNewFile()
+    if ("posix" in FileSystems.getDefault().supportedFileAttributeViews()) {
+        runCatching { Files.setPosixFilePermissions(temp.toPath(), PosixFilePermissions.fromString("rw-------")) }
+    }
+    temp.outputStream().use(write)
+    if (!temp.renameTo(target)) {
+        target.delete()
+        temp.renameTo(target)
     }
 }
 

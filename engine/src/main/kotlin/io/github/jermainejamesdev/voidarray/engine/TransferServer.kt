@@ -2,6 +2,8 @@ package io.github.jermainejamesdev.voidarray.engine
 
 import io.github.jermainejamesdev.voidarray.protocol.DeviceInfo
 import io.github.jermainejamesdev.voidarray.protocol.ErrorResponse
+import io.github.jermainejamesdev.voidarray.protocol.PairRequest
+import io.github.jermainejamesdev.voidarray.protocol.PairResponse
 import io.github.jermainejamesdev.voidarray.protocol.Params
 import io.github.jermainejamesdev.voidarray.protocol.PrepareRequest
 import io.github.jermainejamesdev.voidarray.protocol.PrepareResponse
@@ -12,20 +14,33 @@ import kotlinx.serialization.KSerializer
 import java.io.InputStream
 import javax.net.ssl.SSLContext
 
+/**
+ * Who sent a request: the address it came from and the key it proved it holds in the TLS handshake.
+ * Handlers authenticate by [fingerprint], never by address or by anything claimed in a request body.
+ */
+internal data class Caller(val address: String, val fingerprint: String)
+
 /** Callbacks the HTTP layer delegates to; keeps HTTP details out of the engine's transfer logic. */
 internal interface ServerHandler {
     fun info(): DeviceInfo
-    fun onRegister(peer: DeviceInfo, remoteAddress: String)
-    suspend fun onPrepare(request: PrepareRequest, remoteAddress: String): PrepareOutcome
+    fun onRegister(peer: DeviceInfo, caller: Caller)
+    fun onPair(request: PairRequest, caller: Caller): PairOutcome
+    suspend fun onPrepare(request: PrepareRequest, caller: Caller): PrepareOutcome
     fun onUpload(
         sessionId: String,
         fileId: String,
         token: String,
         offset: Long,
-        remoteAddress: String,
+        caller: Caller,
         body: InputStream,
     ): UploadOutcome
-    fun onCancel(sessionId: String, remoteAddress: String)
+    fun onCancel(sessionId: String, caller: Caller)
+}
+
+internal sealed interface PairOutcome {
+    data class Started(val response: PairResponse) : PairOutcome
+    data object RateLimited : PairOutcome
+    data class Invalid(val message: String) : PairOutcome
 }
 
 internal sealed interface PrepareOutcome {
@@ -33,6 +48,8 @@ internal sealed interface PrepareOutcome {
     data object Declined : PrepareOutcome
     data object Busy : PrepareOutcome
     data class Invalid(val message: String) : PrepareOutcome
+    /** The request was not made by the device it claims to come from. */
+    data class Forbidden(val message: String) : PrepareOutcome
 }
 
 internal sealed interface UploadOutcome {
@@ -56,30 +73,44 @@ internal class TransferServer(
 
     fun stop() = http.stop()
 
-    private fun route(request: HttpRequest): HttpResponse = when ("${request.method} ${request.path}") {
-        "GET ${Routes.INFO}" -> json(DeviceInfo.serializer(), handler.info())
-        "POST ${Routes.REGISTER}" -> withJsonBody(request, DeviceInfo.serializer()) { peer ->
-            handler.onRegister(peer, request.remoteAddress)
-            json(DeviceInfo.serializer(), handler.info())
-        }
-        "POST ${Routes.PREPARE}" -> withJsonBody(request, PrepareRequest.serializer()) { body ->
-            // The connection thread is dedicated to this request, so blocking it while the user decides is fine.
-            when (val outcome = runBlocking { handler.onPrepare(body, request.remoteAddress) }) {
-                is PrepareOutcome.Accepted -> json(PrepareResponse.serializer(), outcome.response)
-                PrepareOutcome.Declined -> error(403, "Declined")
-                PrepareOutcome.Busy -> error(409, "Receiver is busy")
-                is PrepareOutcome.Invalid -> error(400, outcome.message)
+    private fun route(request: HttpRequest): HttpResponse {
+        val route = "${request.method} ${request.path}"
+        if (route == "GET ${Routes.INFO}") return json(DeviceInfo.serializer(), handler.info())
+        val caller = request.peerFingerprint?.let { Caller(request.remoteAddress, it) }
+            ?: return error(401, "A client certificate is required. Update VoidArray on the sending device.")
+        return when (route) {
+            "POST ${Routes.REGISTER}" -> withJsonBody(request, DeviceInfo.serializer()) { peer ->
+                handler.onRegister(peer, caller)
+                json(DeviceInfo.serializer(), handler.info())
             }
+            "POST ${Routes.PAIR}" -> withJsonBody(request, PairRequest.serializer()) { body ->
+                when (val outcome = handler.onPair(body, caller)) {
+                    is PairOutcome.Started -> json(PairResponse.serializer(), outcome.response)
+                    PairOutcome.RateLimited -> error(429, "Too many pairing attempts. Wait a minute and try again.")
+                    is PairOutcome.Invalid -> error(400, outcome.message)
+                }
+            }
+            "POST ${Routes.PREPARE}" -> withJsonBody(request, PrepareRequest.serializer()) { body ->
+                // The connection thread is dedicated to this request, so blocking it while the user decides is fine.
+                when (val outcome = runBlocking { handler.onPrepare(body, caller) }) {
+                    is PrepareOutcome.Accepted -> json(PrepareResponse.serializer(), outcome.response)
+                    PrepareOutcome.Declined -> error(403, "Declined")
+                    PrepareOutcome.Busy -> error(409, "Receiver is busy")
+                    is PrepareOutcome.Invalid -> error(400, outcome.message)
+                    // Distinct from 403 so the sender does not report an impersonation attempt as "declined".
+                    is PrepareOutcome.Forbidden -> error(401, outcome.message)
+                }
+            }
+            "POST ${Routes.UPLOAD}" -> upload(request, caller)
+            "POST ${Routes.CANCEL}" -> {
+                request.query[Params.SESSION]?.let { handler.onCancel(it, caller) }
+                HttpResponse(200, EMPTY_JSON)
+            }
+            else -> error(404, "Not found")
         }
-        "POST ${Routes.UPLOAD}" -> upload(request)
-        "POST ${Routes.CANCEL}" -> {
-            request.query[Params.SESSION]?.let { handler.onCancel(it, request.remoteAddress) }
-            HttpResponse(200, EMPTY_JSON)
-        }
-        else -> error(404, "Not found")
     }
 
-    private fun upload(request: HttpRequest): HttpResponse {
+    private fun upload(request: HttpRequest, caller: Caller): HttpResponse {
         val session = request.query[Params.SESSION]
         val file = request.query[Params.FILE]
         val token = request.query[Params.TOKEN]
@@ -87,7 +118,7 @@ internal class TransferServer(
         if (session == null || file == null || token == null || offset == null || offset < 0) {
             return error(400, "Missing or invalid parameters")
         }
-        return when (val outcome = handler.onUpload(session, file, token, offset, request.remoteAddress, request.body)) {
+        return when (val outcome = handler.onUpload(session, file, token, offset, caller, request.body)) {
             UploadOutcome.Ok -> HttpResponse(200, EMPTY_JSON)
             is UploadOutcome.Rejected -> error(outcome.status, outcome.message)
         }
@@ -102,9 +133,9 @@ internal class TransferServer(
         val text = request.body.readBytes().toString(Charsets.UTF_8)
         val value = try {
             ProtocolJson.decodeFromString(serializer, text)
-        } catch (e: IllegalArgumentException) {
-            // Also covers SerializationException, which extends it.
-            return error(400, "Malformed request: ${e.message}")
+        } catch (_: IllegalArgumentException) {
+            // Also covers SerializationException, which extends it. The parser's detail is not echoed back.
+            return error(400, "Malformed request")
         }
         return block(value)
     }

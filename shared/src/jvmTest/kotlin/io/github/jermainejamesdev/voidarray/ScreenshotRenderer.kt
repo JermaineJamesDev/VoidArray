@@ -51,11 +51,46 @@ class ScreenshotRenderer {
                 AppRoot(controller, SampleActions, isDropTarget = false, startDestination = destination)
             }
         }
-        val offer = SampleController(ThemeMode.DARK, withOffer = true)
+        val offer = SampleController(ThemeMode.DARK, offer = newDeviceOffer)
         renderTo(File(out, "offer-dark-phone.png"), 412, 900) {
             AppRoot(offer, SampleActions, isDropTarget = false, startDestination = Destination.RECEIVE)
         }
+        renderTo(File(out, "offer-dark.png"), 1280, 860) {
+            AppRoot(offer, SampleActions, isDropTarget = false, startDestination = Destination.RECEIVE)
+        }
+        val warning = SampleController(ThemeMode.DARK, offer = changedKeyOffer)
+        renderTo(File(out, "offer-key-changed-dark-phone.png"), 412, 900) {
+            AppRoot(warning, SampleActions, isDropTarget = false, startDestination = Destination.RECEIVE)
+        }
+        val lightOffer = SampleController(ThemeMode.LIGHT, offer = newDeviceOffer)
+        renderTo(File(out, "offer-light-phone.png"), 412, 900) {
+            AppRoot(lightOffer, SampleActions, isDropTarget = false, startDestination = Destination.RECEIVE)
+        }
     }
+
+    private val laptop = DeviceInfo("l1", "Study Laptop", DeviceType.DESKTOP, 53318, fingerprint = "B".repeat(64))
+
+    private val newDeviceOffer = IncomingOffer(
+        id = "o1",
+        sender = laptop,
+        senderAddress = "192.168.1.40",
+        files = listOf(FileSummary("cultivation-notes.md", 12_000), FileSummary("array-diagram.png", 880_000)),
+        text = null,
+        trusted = false,
+        identityChanged = false,
+        pairingCode = "482 913",
+    )
+
+    private val changedKeyOffer = IncomingOffer(
+        id = "o2",
+        sender = DeviceInfo("lab", "Lab PC", DeviceType.DESKTOP, 53318, fingerprint = "C".repeat(64)),
+        senderAddress = "192.168.1.52",
+        files = listOf(FileSummary("VoidArray-setup.exe", 50_400_000), FileSummary("readme.txt", 2_400)),
+        text = null,
+        trusted = false,
+        identityChanged = true,
+        pairingCode = "917 204",
+    )
 
     private fun renderTo(file: File, width: Int, height: Int, content: @androidx.compose.runtime.Composable () -> Unit) {
         val density = 2f
@@ -85,7 +120,7 @@ class ScreenshotRenderer {
         override fun startNetworking() {}
     }
 
-    private class SampleController(theme: ThemeMode, withOffer: Boolean = false) : TransferController {
+    private class SampleController(theme: ThemeMode, offer: IncomingOffer? = null) : TransferController {
         private val phone = DeviceInfo("p1", "Lin's Pixel", DeviceType.MOBILE, 53318, fingerprint = "A".repeat(64))
         private val laptop = DeviceInfo("l1", "Study Laptop", DeviceType.DESKTOP, 53318, fingerprint = "B".repeat(64))
 
@@ -112,23 +147,7 @@ class ScreenshotRenderer {
             listOf(FileSummary("Sword Manual (Vol. 3).pdf", 18_400_000), FileSummary("mountain-sect.jpg", 4_200_000)),
         )
         override val stagedText = MutableStateFlow("")
-        override val incomingOffer = MutableStateFlow(
-            if (withOffer) {
-                IncomingOffer(
-                    id = "o1",
-                    sender = laptop,
-                    senderAddress = "192.168.1.40",
-                    files = listOf(FileSummary("cultivation-notes.md", 12_000), FileSummary("array-diagram.png", 880_000)),
-                    text = null,
-                    verified = true,
-                    trusted = false,
-                    identityChanged = false,
-                    pairingCode = "482 913",
-                )
-            } else {
-                null
-            },
-        )
+        override val incomingOffer = MutableStateFlow(offer)
         override val transfers = MutableStateFlow(
             listOf(
                 TransferState(

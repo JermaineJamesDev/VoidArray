@@ -7,16 +7,15 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -27,8 +26,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalUriHandler
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import io.github.jermainejamesdev.voidarray.core.ThemeMode
@@ -51,9 +48,11 @@ internal fun DeviceSettingsCard(settings: UserSettings, onAliasChange: (String) 
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                 keyboardActions = KeyboardActions(onDone = { if (changed) onAliasChange(alias) }),
+                shape = MaterialTheme.shapes.small,
+                colors = fieldColors(),
                 modifier = Modifier.weight(1f),
             )
-            Button(onClick = { onAliasChange(alias) }, enabled = changed) { Text("Save") }
+            PrimaryButton("Save", onClick = { onAliasChange(alias) }, enabled = changed)
         }
     }
 }
@@ -67,9 +66,9 @@ internal fun ReceivingSettingsCard(
 ) {
     SectionCard(title = "Receiving") {
         SettingRow(title = "Save to", body = destinationLabel) {
-            OutlinedButton(onClick = onChangeFolder) { Text("Change") }
+            SecondaryButton("Change", onClick = onChangeFolder)
         }
-        InkDivider()
+        RowDivider()
         SettingRow(
             title = "Auto-accept from trusted devices",
             body = "Skip the prompt for devices you have trusted. Other devices still ask.",
@@ -102,11 +101,15 @@ internal fun AppearanceSettingsCard(
                             },
                         )
                     },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
+                        selectedLabelColor = MaterialTheme.colorScheme.primary,
+                    ),
                 )
             }
         }
         if (supportsTray) {
-            InkDivider()
+            RowDivider()
             SettingRow(
                 title = "Keep running in the tray when closed",
                 body = "Closing the window keeps this PC visible to your other devices.",
@@ -124,39 +127,46 @@ internal fun SecuritySettingsCard(
     onForget: (TrustedDevice) -> Unit,
 ) {
     var forgetting by remember { mutableStateOf<TrustedDevice?>(null) }
+    val mono = VoidArrayTheme.extras.mono
     SectionCard(
         title = "Security",
         subtitle = "Transfers are encrypted. Devices are identified by their key.",
     ) {
-        Text("This device's key", style = MaterialTheme.typography.bodyLarge)
-        Text(
-            fingerprint,
-            style = MaterialTheme.typography.bodySmall,
-            fontFamily = FontFamily.Monospace,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        InkDivider()
-        Text("Trusted devices", style = MaterialTheme.typography.bodyLarge)
-        if (trusted.isEmpty()) {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            GroupLabel("This device's key")
             Text(
-                "None yet. Tick \"Trust this device\" when accepting a transfer.",
+                fingerprint,
                 style = MaterialTheme.typography.bodySmall,
+                fontFamily = mono,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        trusted.forEach { device ->
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                IconBadge(AppIcons.Lock, size = 36.dp)
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(device.alias, fontWeight = FontWeight.Medium)
-                    Text(
-                        device.fingerprint.chunked(4).take(4).joinToString(" "),
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+        RowDivider()
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            GroupLabel("Trusted devices")
+            if (trusted.isEmpty()) {
+                Text(
+                    "None yet. Tick \"Trust this device\" when accepting a transfer.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            trusted.forEach { device ->
+                InsetRow {
+                    IconTile(AppIcons.Lock, tone = Tone.JADE, size = 36.dp)
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(device.alias, style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            device.fingerprint.chunked(4).take(4).joinToString(" "),
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = mono,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    IconButton(onClick = { forgetting = device }) {
+                        Icon(AppIcons.Delete, contentDescription = "Forget ${device.alias}", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
-                IconButton(onClick = { forgetting = device }) { Icon(AppIcons.Delete, contentDescription = "Forget ${device.alias}") }
             }
         }
     }
@@ -166,12 +176,12 @@ internal fun SecuritySettingsCard(
             title = { Text("Forget ${device.alias}?") },
             text = { Text("Transfers from this device will ask for approval again.") },
             confirmButton = {
-                TextButton(onClick = {
+                QuietButton("Forget", onClick = {
                     forgetting = null
                     onForget(device)
-                }) { Text("Forget") }
+                }, color = MaterialTheme.colorScheme.error)
             },
-            dismissButton = { TextButton(onClick = { forgetting = null }) { Text("Cancel") } },
+            dismissButton = { QuietButton("Cancel", onClick = { forgetting = null }) },
         )
     }
 }
@@ -186,13 +196,16 @@ internal fun AboutCard(version: String) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = { runCatching { uriHandler.openUri(SOURCE_URL) } }) { Text("Source code") }
-            TextButton(onClick = { runCatching { uriHandler.openUri("$SOURCE_URL/issues") } }) { Text("Report an issue") }
+            SecondaryButton("Source code", onClick = { runCatching { uriHandler.openUri(SOURCE_URL) } })
+            QuietButton("Report an issue", onClick = { runCatching { uriHandler.openUri("$SOURCE_URL/issues") } })
         }
     }
 }
 
 private const val SOURCE_URL = "https://github.com/JermaineJamesDev/VoidArray"
+
+@Composable
+private fun RowDivider() = HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
 @Composable
 private fun SettingRow(title: String, body: String, control: @Composable () -> Unit) {

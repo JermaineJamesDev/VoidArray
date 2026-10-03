@@ -2,6 +2,8 @@ package io.github.jermainejamesdev.voidarray.engine
 
 import io.github.jermainejamesdev.voidarray.protocol.DeviceInfo
 import io.github.jermainejamesdev.voidarray.protocol.ErrorResponse
+import io.github.jermainejamesdev.voidarray.protocol.PairRequest
+import io.github.jermainejamesdev.voidarray.protocol.PairResponse
 import io.github.jermainejamesdev.voidarray.protocol.Params
 import io.github.jermainejamesdev.voidarray.protocol.PrepareRequest
 import io.github.jermainejamesdev.voidarray.protocol.PrepareResponse
@@ -31,20 +33,19 @@ import kotlinx.coroutines.withContext
 import okhttp3.ConnectionPool
 import okhttp3.Interceptor
 import java.io.IOException
-import java.security.SecureRandom
 import java.security.cert.X509Certificate
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
-import javax.net.ssl.X509TrustManager
 
 /**
  * HTTPS client that authenticates peers by pinned public key instead of by certificate chain. Peers are
  * addressed by LAN IP with self-signed certificates, so chain and hostname validation are meaningless;
  * every request that carries data instead names the fingerprint it expects, and a network interceptor
- * checks it against the TLS handshake before any request bytes are written.
+ * checks it against the TLS handshake before any request bytes are written. [sslContext] also presents
+ * this device's certificate, which is how the receiving side knows who is calling.
  */
-internal class TransferClient {
+internal class TransferClient(sslContext: SSLContext) {
     private val http = HttpClient(OkHttp) {
         expectSuccess = false
         install(HttpTimeout) {
@@ -53,7 +54,7 @@ internal class TransferClient {
         }
         engine {
             config {
-                sslSocketFactory(acceptAnyContext.socketFactory, AcceptAnyTrustManager)
+                sslSocketFactory(sslContext.socketFactory, PinnedByCallerTrustManager)
                 hostnameVerifier { _, _ -> true }
                 // Shorter than the server's 60s keep-alive limit; see HttpsServer.READ_TIMEOUT_MILLIS.
                 connectionPool(ConnectionPool(5, 30, TimeUnit.SECONDS))
@@ -75,19 +76,24 @@ internal class TransferClient {
                 requestTimeoutMillis = 2_000
             }
         }
-        val info = response.decodeOrThrow<DeviceInfo>()
-        val presented = response.headers[OBSERVED_HEADER]
-        if (presented == null || !presented.equals(info.fingerprint, ignoreCase = true)) {
-            throw TransferException("The device at $host presented a certificate that does not match its identity.")
-        }
-        return info
+        return response.decodeOrThrow<DeviceInfo>().requireMatchesPresentedKey(response, host)
     }
 
+    /** Returns the peer's info, checked against the key it presented like [info]. */
     suspend fun register(host: String, port: Int, pin: String, self: DeviceInfo): DeviceInfo {
         val response = http.post(url(host, port, Routes.REGISTER)) {
             pin(pin)
             setBody(jsonBody(ProtocolJson.encodeToString(DeviceInfo.serializer(), self)))
             timeout { requestTimeoutMillis = 3_000 }
+        }
+        return response.decodeOrThrow<DeviceInfo>().requireMatchesPresentedKey(response, host)
+    }
+
+    suspend fun pair(host: String, port: Int, pin: String, request: PairRequest): PairResponse {
+        val response = http.post(url(host, port, Routes.PAIR)) {
+            pin(pin)
+            setBody(jsonBody(ProtocolJson.encodeToString(PairRequest.serializer(), request)))
+            timeout { requestTimeoutMillis = 5_000 }
         }
         return response.decodeOrThrow()
     }
@@ -183,13 +189,6 @@ internal class TransferClient {
         data class Failed(val message: String) : PrepareResult
     }
 
-    private object AcceptAnyTrustManager : X509TrustManager {
-        // Intentionally accepts any chain: authentication is the SPKI pin checked in PinningInterceptor.
-        override fun checkClientTrusted(chain: Array<out X509Certificate>, authType: String) {}
-        override fun checkServerTrusted(chain: Array<out X509Certificate>, authType: String) {}
-        override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
-    }
-
     /**
      * Runs after the TLS handshake and before the request is written. Requests tagged with [PIN_HEADER]
      * fail unless the server's key matches; every response is tagged with the key that was presented.
@@ -215,8 +214,13 @@ internal class TransferClient {
         const val PIN_HEADER = "X-VoidArray-Expect-Key"
         const val OBSERVED_HEADER = "X-VoidArray-Presented-Key"
 
-        val acceptAnyContext: SSLContext = SSLContext.getInstance("TLS").apply {
-            init(null, arrayOf(AcceptAnyTrustManager), SecureRandom())
+        /** A peer cannot claim another device's identity in its info: the claim must name the key it presented. */
+        fun DeviceInfo.requireMatchesPresentedKey(response: HttpResponse, host: String): DeviceInfo {
+            val presented = response.headers[OBSERVED_HEADER]
+            if (presented == null || !presented.equals(fingerprint, ignoreCase = true)) {
+                throw TransferException("The device at $host presented a certificate that does not match its identity.")
+            }
+            return this
         }
 
         fun url(host: String, port: Int, path: String): String {
