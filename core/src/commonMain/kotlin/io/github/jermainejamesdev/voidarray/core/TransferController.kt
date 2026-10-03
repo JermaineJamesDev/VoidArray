@@ -25,7 +25,7 @@ interface TransferController {
     fun setStagedText(text: String)
     fun sendStaged(peer: Peer)
 
-    /** [trust] remembers the sender so later offers can be auto-accepted; ignored for unverified senders. */
+    /** [trust] remembers the sender's key so later offers from it can be auto-accepted. */
     fun respondToOffer(accept: Boolean, trust: Boolean = false)
     fun cancelTransfer(id: String)
     fun clearFinishedTransfers()
@@ -119,8 +119,6 @@ data class IncomingOffer(
     val senderAddress: String,
     val files: List<FileSummary>,
     val text: String?,
-    /** The sender proved it holds the private key for its claimed fingerprint. */
-    val verified: Boolean,
     val trusted: Boolean,
     val identityChanged: Boolean,
     /** Short code both devices display so the users can confirm they are talking to each other. */

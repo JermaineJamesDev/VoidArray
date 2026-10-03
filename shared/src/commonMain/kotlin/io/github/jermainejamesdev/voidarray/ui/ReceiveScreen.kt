@@ -1,66 +1,109 @@
 package io.github.jermainejamesdev.voidarray.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.jermainejamesdev.voidarray.core.LocalStatus
 import io.github.jermainejamesdev.voidarray.protocol.DeviceType
 
 @Composable
-internal fun ReceiveStatusCard(local: LocalStatus, deviceType: DeviceType) {
+internal fun ReceiveStatusCard(local: LocalStatus, deviceType: DeviceType, onCopy: (String) -> Unit) {
     val scheme = MaterialTheme.colorScheme
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.extraLarge,
+        shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(containerColor = scheme.surfaceContainerLow, contentColor = scheme.onSurface),
-        border = goldHairline(),
     ) {
-        Column(
-            modifier = Modifier.fillMaxWidth().padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Box(contentAlignment = Alignment.Center) {
-                FormationArray(modifier = Modifier.size(168.dp), spinning = local.serverRunning, periodMillis = 40_000)
-                IconBadge(deviceIcon(deviceType), size = 56.dp, container = scheme.primary, content = scheme.onPrimary)
+        Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+                Box(contentAlignment = Alignment.Center) {
+                    FormationArray(modifier = Modifier.size(104.dp), spinning = local.serverRunning, periodMillis = 40_000)
+                    Box(
+                        modifier = Modifier.size(38.dp).clip(CircleShape)
+                            .background(if (local.serverRunning) scheme.primary else scheme.surfaceContainerHigh),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            deviceIcon(deviceType),
+                            contentDescription = null,
+                            tint = if (local.serverRunning) scheme.onPrimary else scheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                }
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(local.alias, style = MaterialTheme.typography.titleLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Box(Modifier.size(8.dp).clip(CircleShape).background(if (local.serverRunning) scheme.primary else scheme.error))
+                        Text(
+                            if (local.serverRunning) "Ready to receive" else "Not receiving",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = if (local.serverRunning) scheme.primary else scheme.error,
+                        )
+                    }
+                    Text(
+                        if (local.serverRunning) "Visible to devices on this network" else "Other devices cannot reach this one",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = scheme.onSurfaceVariant,
+                    )
+                }
             }
-            Text(local.alias, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-            Text(
-                if (local.serverRunning) "Ready to receive" else "Not receiving",
-                style = MaterialTheme.typography.titleSmall,
-                color = if (local.serverRunning) scheme.primary else scheme.error,
-            )
-            Text(
-                if (local.serverRunning) "The array is open to your devices" else "The array is closed",
-                style = MaterialTheme.typography.bodySmall,
-                color = scheme.onSurfaceVariant,
-            )
-            if (local.serverRunning) {
-                val endpoints = local.addresses.joinToString("   ") { "$it:${local.port}" }
-                Text(
-                    if (endpoints.isEmpty()) "No network connection" else endpoints,
-                    style = MaterialTheme.typography.bodySmall,
-                )
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (local.serverRunning) {
+                    val endpoints = local.addresses.map { "$it:${local.port}" }
+                    DetailRow(
+                        label = "Address",
+                        value = endpoints.joinToString("  ").ifEmpty { "No network connection" },
+                        copyLabel = "Copy address",
+                        onCopy = endpoints.takeIf { it.isNotEmpty() }?.let { { onCopy(it.first()) } },
+                    )
+                }
+                val shortKey = local.fingerprint.split(' ').take(4).joinToString(" ")
+                DetailRow(label = "Key", value = shortKey, copyLabel = "Copy key fingerprint", onCopy = { onCopy(local.fingerprint) })
             }
-            Text(
-                "Key ${local.fingerprint.split(' ').take(4).joinToString(" ")}",
-                style = MaterialTheme.typography.labelSmall,
-            )
+        }
+    }
+}
+
+@Composable
+private fun DetailRow(label: String, value: String, copyLabel: String, onCopy: (() -> Unit)?) {
+    InsetRow(contentPadding = PaddingValues(start = 12.dp, top = 4.dp, end = 4.dp, bottom = 4.dp)) {
+        Text(
+            label,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.width(60.dp),
+        )
+        Text(
+            value,
+            style = MaterialTheme.typography.bodyMedium,
+            fontFamily = VoidArrayTheme.extras.mono,
+            modifier = Modifier.weight(1f).padding(vertical = 10.dp),
+        )
+        if (onCopy != null) {
+            IconButton(onClick = onCopy) {
+                Icon(AppIcons.Copy, contentDescription = copyLabel, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
+            }
         }
     }
 }
@@ -69,12 +112,12 @@ internal fun ReceiveStatusCard(local: LocalStatus, deviceType: DeviceType) {
 internal fun ReceiveFolderCard(destinationLabel: String, onChange: () -> Unit, onOpen: () -> Unit) {
     SectionCard(title = "Save received files to") {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            IconBadge(AppIcons.Folder)
+            IconTile(AppIcons.Folder, tone = Tone.GOLD)
             Text(destinationLabel, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = onChange) { Text("Change") }
-            TextButton(onClick = onOpen) { Text("Open folder") }
+            SecondaryButton("Change", onClick = onChange)
+            QuietButton("Open folder", onClick = onOpen)
         }
     }
 }

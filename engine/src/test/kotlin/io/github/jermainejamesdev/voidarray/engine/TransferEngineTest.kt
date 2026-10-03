@@ -1,7 +1,12 @@
 package io.github.jermainejamesdev.voidarray.engine
 
 import io.github.jermainejamesdev.voidarray.core.TransferStatus
+import io.github.jermainejamesdev.voidarray.protocol.DeviceInfo
 import io.github.jermainejamesdev.voidarray.protocol.DeviceType
+import io.github.jermainejamesdev.voidarray.protocol.FileMeta
+import io.github.jermainejamesdev.voidarray.protocol.PairRequest
+import io.github.jermainejamesdev.voidarray.protocol.PrepareRequest
+import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
@@ -17,6 +22,7 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class TransferEngineTest {
@@ -27,6 +33,8 @@ class TransferEngineTest {
     private lateinit var receiver: TransferEngine
     private lateinit var senderSettings: AppSettings
     private lateinit var receiverSettings: AppSettings
+    private lateinit var senderIdentity: DeviceIdentity
+    private lateinit var receiverIdentity: DeviceIdentity
 
     private class MemoryStore : KeyValueStore {
         private val map = mutableMapOf<String, String>()
@@ -43,12 +51,14 @@ class TransferEngineTest {
         destDir = File(root, "dest").apply { mkdirs() }
         senderSettings = AppSettings(MemoryStore(), "Sender")
         receiverSettings = AppSettings(MemoryStore(), "Receiver")
+        senderIdentity = DeviceIdentity.loadOrCreate(File(root, "sender.p12"), senderSettings.store)
+        receiverIdentity = DeviceIdentity.loadOrCreate(File(root, "receiver.p12"), receiverSettings.store)
         sender = TransferEngine(
-            DeviceType.DESKTOP, senderSettings, DeviceIdentity.loadOrCreate(File(root, "sender.p12"), senderSettings.store),
+            DeviceType.DESKTOP, senderSettings, senderIdentity,
             LocalDestinationFolder(File(root, "unused")), log = { println("sender: $it") },
         )
         receiver = TransferEngine(
-            DeviceType.MOBILE, receiverSettings, DeviceIdentity.loadOrCreate(File(root, "receiver.p12"), receiverSettings.store),
+            DeviceType.MOBILE, receiverSettings, receiverIdentity,
             LocalDestinationFolder(destDir), historyFile = File(root, "history.json"), log = {},
         )
         sender.start { true }
@@ -120,7 +130,7 @@ class TransferEngineTest {
     fun resumesFromExistingPartialFile() = runBlocking {
         val file = sourceFile("video.mp4", 2 * 1024 * 1024)
         val alreadyReceived = 700_001
-        val partial = File(destDir, partialFileName(senderSettings.deviceId, file.name, file.length()))
+        val partial = File(destDir, partialFileName(senderIdentity.fingerprint, file.name, file.length()))
         partial.writeBytes(file.readBytes().copyOf(alreadyReceived))
 
         assertEquals(TransferStatus.COMPLETED, connectAndSend(listOf(file), accept = true))
@@ -175,6 +185,66 @@ class TransferEngineTest {
         assertEquals(TransferStatus.FAILED, finished.status)
         assertTrue(receiver.incomingOffer.value == null)
         assertTrue(destDir.listFiles()!!.isEmpty())
+    }
+
+    @Test
+    fun bothDevicesShowTheSamePairingCode(): Unit = runBlocking {
+        sender.addManualPeer("127.0.0.1", receiver.local.value.port!!)
+        val peer = withTimeout(10_000) { sender.peers.first { it.isNotEmpty() }.single() }
+        sender.setStagedText("hello")
+        coroutineScope {
+            val codes = async {
+                val offer = receiver.incomingOffer.filterNotNull().first()
+                // The sender shows its code before it sends the offer, so it is already set here.
+                val senderCode = sender.transfers.value.first().pairingCode
+                receiver.respondToOffer(accept = false)
+                offer.pairingCode to senderCode
+            }
+            sender.sendStaged(peer)
+            val (receiverCode, senderCode) = withTimeout(15_000) { codes.await() }
+            assertEquals(receiverCode, senderCode)
+            withTimeout(15_000) { sender.transfers.first { list -> list.none { it.isActive } } }
+        }
+    }
+
+    /** Talks to the receiver directly as a third device, to send requests a real engine never would. */
+    private suspend fun <T> asIntruder(block: suspend (TransferClient, DeviceIdentity, Int) -> T): T {
+        val intruder = DeviceIdentity.loadOrCreate(File(root, "intruder.p12"), MemoryStore())
+        val client = TransferClient(intruder.sslContext())
+        return try {
+            block(client, intruder, receiver.local.value.port!!)
+        } finally {
+            client.close()
+        }
+    }
+
+    private fun offerOf(sender: DeviceInfo, pairingId: String, nonce: String) =
+        PrepareRequest(sender, listOf(FileMeta("f0", "x.txt", 1)), text = null, pairingId = pairingId, nonce = nonce)
+
+    @Test
+    fun receiverRejectsOfferNamingAKeyTheCallerDoesNotHold() = runBlocking {
+        val result = asIntruder { client, intruder, port ->
+            val nonce = "ab".repeat(32)
+            val pairing = client.pair("127.0.0.1", port, receiverIdentity.fingerprint, PairRequest(pairingCommitment(intruder.fingerprint, nonce)))
+            // Claims the real sender's id and key, which a receiver might trust, but holds a different key.
+            val claimed = DeviceInfo(senderSettings.deviceId, "Sender", DeviceType.DESKTOP, 1, fingerprint = senderIdentity.fingerprint)
+            client.prepare("127.0.0.1", port, receiverIdentity.fingerprint, offerOf(claimed, pairing.pairingId, nonce))
+        }
+        assertTrue(result is TransferClient.PrepareResult.Failed, "$result")
+        assertNull(receiver.incomingOffer.value)
+    }
+
+    @Test
+    fun receiverRejectsOfferWhoseNonceDoesNotMatchItsCommitment() = runBlocking {
+        val result = asIntruder { client, intruder, port ->
+            val pairing = client.pair(
+                "127.0.0.1", port, receiverIdentity.fingerprint, PairRequest(pairingCommitment(intruder.fingerprint, "ab".repeat(32))),
+            )
+            val honest = DeviceInfo("intruder", "Intruder", DeviceType.DESKTOP, 1, fingerprint = intruder.fingerprint)
+            client.prepare("127.0.0.1", port, receiverIdentity.fingerprint, offerOf(honest, pairing.pairingId, "cd".repeat(32)))
+        }
+        assertTrue(result is TransferClient.PrepareResult.Failed && "Pairing" in result.message, "$result")
+        assertNull(receiver.incomingOffer.value)
     }
 
     @Test

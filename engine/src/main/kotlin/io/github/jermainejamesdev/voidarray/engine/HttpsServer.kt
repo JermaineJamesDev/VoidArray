@@ -6,19 +6,23 @@ import java.io.FilterInputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ProtocolException
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketException
 import java.net.URLDecoder
+import java.security.cert.X509Certificate
 import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Semaphore
 import java.util.concurrent.atomic.AtomicInteger
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLException
+import javax.net.ssl.SSLServerSocket
 import javax.net.ssl.SSLSocket
 
 internal class HttpRequest(
@@ -28,6 +32,8 @@ internal class HttpRequest(
     /** Header names are lowercased. */
     val headers: Map<String, String>,
     val remoteAddress: String,
+    /** SPKI fingerprint of the client certificate presented in the TLS handshake, or null if none was sent. */
+    val peerFingerprint: String?,
     /** Bounded to Content-Length; reading past it returns EOF. */
     val body: InputStream,
 ) {
@@ -52,13 +58,21 @@ internal class HttpsServer(
     private var executor: ExecutorService? = null
     private val connections = Collections.synchronizedSet(mutableSetOf<Socket>())
     private val connectionPermits = Semaphore(MAX_CONNECTIONS)
+    private val connectionsPerAddress = ConcurrentHashMap<InetAddress, Int>()
 
-    /** Binds [port] on all interfaces (0 for ephemeral) and returns the bound port. */
+    /**
+     * Binds [port] on all interfaces (0 for ephemeral) and returns the bound port. Connections from
+     * outside the local network are dropped before the handshake; see [isLocalNetworkPeer].
+     */
     @Synchronized
     fun start(port: Int): Int {
         check(serverSocket == null) { "Already started" }
-        val socket = sslContext.serverSocketFactory.createServerSocket().apply {
+        val socket = (sslContext.serverSocketFactory.createServerSocket() as SSLServerSocket).apply {
             reuseAddress = true
+            restrictTlsProtocols()
+            // "Want" rather than "need" so an older or foreign client can still read /info and learn it
+            // is incompatible; every route that changes state rejects requests without a certificate.
+            wantClientAuth = true
             bind(InetSocketAddress(port), BACKLOG)
         }
         val threadCount = AtomicInteger()
@@ -90,8 +104,18 @@ internal class HttpsServer(
                 log("Accept failed: $e")
                 continue
             }
+            val address = client.inetAddress
+            if (address == null || !isLocalNetworkPeer(address)) {
+                runCatching { client.close() }
+                continue
+            }
+            if (!tryReserve(address)) {
+                runCatching { client.close() }
+                continue
+            }
             if (!connectionPermits.tryAcquire()) {
                 // Refuse rather than queue: a flood of connections must not starve the real peer's transfer.
+                release(address)
                 runCatching { client.close() }
                 continue
             }
@@ -103,21 +127,40 @@ internal class HttpsServer(
                     connections -= client
                     runCatching { client.close() }
                     connectionPermits.release()
+                    release(address)
                 }
             }
         }
     }
 
+    /** One host may hold only a few of the shared slots, so a single noisy device cannot lock out the rest. */
+    private fun tryReserve(address: InetAddress): Boolean {
+        var reserved = false
+        connectionsPerAddress.compute(address) { _, count ->
+            val current = count ?: 0
+            if (current >= MAX_CONNECTIONS_PER_ADDRESS) current else (current + 1).also { reserved = true }
+        }
+        return reserved
+    }
+
+    private fun release(address: InetAddress) {
+        connectionsPerAddress.computeIfPresent(address) { _, count -> if (count <= 1) null else count - 1 }
+    }
+
     private fun serve(socket: Socket) {
         try {
             socket.soTimeout = HANDSHAKE_TIMEOUT_MILLIS
-            (socket as SSLSocket).startHandshake()
+            val tls = socket as SSLSocket
+            tls.startHandshake()
+            val peerFingerprint = runCatching { tls.session.peerCertificates.firstOrNull() as? X509Certificate }
+                .getOrNull()
+                ?.let { spkiFingerprint(it.publicKey) }
             val input = BufferedInputStream(socket.getInputStream(), BUFFER_SIZE)
             val output = BufferedOutputStream(socket.getOutputStream(), 16 * 1024)
             val remote = socket.inetAddress.hostAddress ?: return
             socket.soTimeout = READ_TIMEOUT_MILLIS
             while (!socket.isClosed) {
-                val request = readRequest(input, remote) ?: return
+                val request = readRequest(input, remote, peerFingerprint) ?: return
                 val response = try {
                     handler(request)
                 } catch (e: Exception) {
@@ -143,7 +186,7 @@ internal class HttpsServer(
     }
 
     /** Returns null on a clean end of stream between requests. Throws on malformed input. */
-    private fun readRequest(input: InputStream, remoteAddress: String): HttpRequest? {
+    private fun readRequest(input: InputStream, remoteAddress: String, peerFingerprint: String?): HttpRequest? {
         val requestLine = readLine(input, allowEof = true) ?: return null
         val parts = requestLine.split(' ')
         if (parts.size != 3 || !parts[2].startsWith("HTTP/1.")) throw ProtocolException("Bad request line")
@@ -169,7 +212,7 @@ internal class HttpsServer(
             val value = pair.substringAfter('=', "")
             URLDecoder.decode(key, "UTF-8") to URLDecoder.decode(value, "UTF-8")
         }
-        return HttpRequest(parts[0], path, query, headers, remoteAddress, BoundedInputStream(input, length))
+        return HttpRequest(parts[0], path, query, headers, remoteAddress, peerFingerprint, BoundedInputStream(input, length))
     }
 
     /** Reads a CRLF- or LF-terminated ASCII line of at most [MAX_LINE_BYTES]. */
@@ -204,11 +247,13 @@ internal class HttpsServer(
     private fun reason(status: Int): String = when (status) {
         200 -> "OK"
         400 -> "Bad Request"
+        401 -> "Unauthorized"
         403 -> "Forbidden"
         404 -> "Not Found"
         409 -> "Conflict"
         410 -> "Gone"
         413 -> "Payload Too Large"
+        429 -> "Too Many Requests"
         else -> if (status >= 500) "Server Error" else "Status"
     }
 
@@ -247,6 +292,7 @@ internal class HttpsServer(
     private companion object {
         const val BACKLOG = 50
         const val MAX_CONNECTIONS = 32
+        const val MAX_CONNECTIONS_PER_ADDRESS = 8
         const val MAX_LINE_BYTES = 8 * 1024
         const val MAX_HEADER_BYTES = 16 * 1024
         const val MAX_HEADERS = 64

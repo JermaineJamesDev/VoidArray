@@ -121,11 +121,13 @@ private val windowsReservedNames = setOf(
  */
 fun sanitizeFileName(raw: String): String {
     var name = raw.substringAfterLast('/').substringAfterLast('\\')
-    name = name.filterNot { it.code < 0x20 || it in "<>:\"|?*" }
+    name = stripInvisible(name).filterNot { it in "<>:\"|?*" }
     // Windows silently strips trailing dots and spaces, which would make two different names collide.
     name = name.trim().trimEnd('.', ' ')
     if (name.isEmpty() || name == "." || name == "..") name = "file"
     if (name.substringBefore('.').uppercase() in windowsReservedNames) name = "_$name"
+    // A finished file must never be mistaken for, or collide with, one of the receiver's own partials.
+    if (name.startsWith(PARTIAL_PREFIX)) name = "_$name"
     if (name.length > 200) {
         val ext = name.substringAfterLast('.', "").take(20)
         name = if (ext.isEmpty()) name.take(200) else name.take(199 - ext.length) + "." + ext
@@ -147,11 +149,38 @@ fun uniqueName(desired: String, exists: (String) -> Boolean): String {
 }
 
 /**
- * Partial files are keyed by sender, name and size so a retried transfer of the same file finds
- * its earlier bytes, while a different file that happens to share the name does not.
+ * Partial files are keyed by the sender's key fingerprint, name and size so a retried transfer of the
+ * same file finds its earlier bytes, while a different file that happens to share the name does not.
+ * The fingerprint rather than the claimed device id, so no other device can append to the partial.
  */
-fun partialFileName(senderId: String, name: String, size: Long): String {
-    val digest = MessageDigest.getInstance("SHA-256").digest("$senderId/$name/$size".toByteArray())
+fun partialFileName(senderFingerprint: String, name: String, size: Long): String {
+    val digest = MessageDigest.getInstance("SHA-256").digest("${senderFingerprint.uppercase()}/$name/$size".toByteArray())
     val hex = digest.take(10).joinToString("") { "%02x".format(it) }
-    return ".voidarray-$hex.part"
+    return "$PARTIAL_PREFIX$hex.part"
+}
+
+private const val PARTIAL_PREFIX = ".voidarray-"
+
+/**
+ * Cleans a peer-chosen device name for display: no control or direction-override characters, no line
+ * breaks, and short enough that it cannot push warnings off the screen. Empty becomes a neutral label.
+ */
+fun sanitizeAlias(raw: String): String {
+    // Whitespace becomes spaces first, since tabs and line breaks are control characters that would vanish.
+    val cleaned = stripInvisible(raw.replace(Regex("\\s+"), " ")).replace(Regex(" +"), " ").trim()
+    return cleaned.take(MAX_ALIAS_LENGTH).trim().ifEmpty { "Unnamed device" }
+}
+
+const val MAX_ALIAS_LENGTH = 64
+
+/**
+ * Removes control characters and invisible formatting characters. The latter include right-to-left
+ * overrides, which can make "photo‮gnp.exe" display as "photoexe.png", and zero-width characters
+ * that make two different names look identical.
+ */
+private fun stripInvisible(text: String): String = text.filterNot { c ->
+    when (Character.getType(c).toByte()) {
+        Character.CONTROL, Character.FORMAT, Character.LINE_SEPARATOR, Character.PARAGRAPH_SEPARATOR -> true
+        else -> false
+    }
 }

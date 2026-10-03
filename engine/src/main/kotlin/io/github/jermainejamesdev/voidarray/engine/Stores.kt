@@ -51,13 +51,8 @@ internal class HistoryStore(private val file: File?) {
     @Synchronized
     fun save(entries: List<HistoryEntry>) {
         val target = file ?: return
-        target.parentFile?.mkdirs()
-        val temp = File(target.parentFile, target.name + ".tmp")
-        temp.writeText(ProtocolJson.encodeToString(serializer, entries))
-        if (!temp.renameTo(target)) {
-            target.delete()
-            temp.renameTo(target)
-        }
+        val json = ProtocolJson.encodeToString(serializer, entries).toByteArray()
+        writeFileAtomically(target) { it.write(json) }
     }
 
     companion object {

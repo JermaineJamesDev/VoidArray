@@ -38,9 +38,10 @@ class HttpsServerTest {
     fun setUp() {
         dir = Files.createTempDirectory("voidarray-http").toFile()
         val identity = DeviceIdentity.loadOrCreate(File(dir, "id.p12"), MemoryStore())
-        server = HttpsServer(identity.serverSslContext(), { request ->
+        server = HttpsServer(identity.sslContext(), { request ->
             val body = request.body.readBytes().toString(Charsets.UTF_8)
-            HttpResponse(200, "${request.method} ${request.path} ${request.query} $body".toByteArray(), "text/plain")
+            val text = "${request.method} ${request.path} ${request.query} $body key=${request.peerFingerprint}"
+            HttpResponse(200, text.toByteArray(), "text/plain")
         }, log = {})
         port = server.start(0)
     }
@@ -52,8 +53,8 @@ class HttpsServerTest {
     }
 
     /** Sends raw bytes over TLS and returns everything the server writes until it closes the connection. */
-    private fun exchange(raw: String): String {
-        val socket = clientContext.socketFactory.createSocket("127.0.0.1", port) as SSLSocket
+    private fun exchange(raw: String, context: SSLContext = clientContext): String {
+        val socket = context.socketFactory.createSocket("127.0.0.1", port) as SSLSocket
         socket.use {
             it.soTimeout = 3_000
             it.outputStream.write(raw.toByteArray())
@@ -105,5 +106,18 @@ class HttpsServerTest {
         }
         val healthy = exchange("GET /ok HTTP/1.1\r\nConnection: close\r\n\r\n")
         assertTrue(healthy.startsWith("HTTP/1.1 200"), healthy)
+    }
+
+    @Test
+    fun reportsClientCertificateKeyIncludingOnResumedSessions() {
+        val caller = DeviceIdentity.loadOrCreate(File(dir, "caller.p12"), MemoryStore())
+        val context = caller.sslContext()
+        val request = "GET /who HTTP/1.1\r\nConnection: close\r\n\r\n"
+        // The second connection from the same context resumes the TLS session; the key must survive that.
+        repeat(2) { attempt ->
+            val response = exchange(request, context)
+            assertTrue(response.contains("key=${caller.fingerprint}"), "attempt $attempt: $response")
+        }
+        assertTrue(exchange(request).contains("key=null"), "a client without a certificate has no key")
     }
 }

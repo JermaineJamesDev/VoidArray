@@ -48,12 +48,11 @@ Get the latest build from the [Releases page](https://github.com/JermaineJamesDe
 | Platform | File | Notes |
 | --- | --- | --- |
 | Android 8.0+ | `VoidArray-X.Y.Z.apk` | Allow installing apps from your browser or file manager when prompted. |
-| Windows 10/11 | `VoidArray-X.Y.Z-setup.exe` | Standard installer. |
-| Windows 10/11 | `VoidArray-X.Y.Z.msi` | For managed or scripted installs. |
-| Windows 10/11 | `VoidArray-X.Y.Z-portable.zip` | No install: unzip anywhere (even a USB drive) and run `VoidArray.exe`. Settings and keys stay in a `data` folder beside it. |
+| Windows 10/11 | `VoidArray-X.Y.Z-portable.zip` | No install: unzip anywhere (even a USB drive) and run `VoidArray.exe`. Settings and keys stay in a `data` folder beside it, so anyone with the drive can copy them. |
 
-Each file has a matching `.sha256` checksum. The Windows installers are not code-signed yet, so
-SmartScreen may warn on first run; choose **More info > Run anyway**.
+Each file has a matching `.sha256` checksum. The Windows build is not code-signed yet, so SmartScreen may
+warn on first run; choose **More info > Run anyway**. An installer (EXE or MSI) can be built from source;
+see below.
 
 ### First run on Windows
 
@@ -66,10 +65,10 @@ To add the firewall rules ahead of time, run
 
 | Piece | Detail |
 | --- | --- |
-| Discovery | UDP multicast on `224.0.0.168:53318` plus directed broadcast. **Scan** probes the local /24 as a fallback, and devices can be added by IP address. |
-| Transport | HTTPS on TCP port 53318, served by a small built-in HTTP/1.1 server (Ktor's CIO server cannot serve TLS). |
-| Identity | Each install generates a self-signed certificate. Peers pin the SHA-256 of its public key (SPKI) on every request that carries data. |
-| Sender verification | A receiver calls back to the sender's own server with the claimed key pinned, proving the sender holds that key before it can be treated as trusted. |
+| Discovery | UDP multicast on `224.0.0.168:53318` plus directed broadcast. A device is listed only after a TLS exchange pinned to the key it announced. **Scan** probes the local /24 as a fallback, and devices can be added by IP address. |
+| Transport | HTTPS (TLS 1.2/1.3) on TCP port 53318, served by a small built-in HTTP/1.1 server (Ktor's CIO server cannot serve TLS). Only local-network addresses are accepted. |
+| Identity | Each install generates a self-signed certificate. Peers pin the SHA-256 of its public key (SPKI), and both sides present their certificate (mutual TLS), so the receiver knows which key every request came from. |
+| Pairing code | Derived from both keys and a random value from each side. The sender commits to its value before seeing the receiver's, so a man in the middle cannot make the codes match. |
 | Storage | Incoming files are written to hidden partial files and renamed when complete, which is also what makes resume possible. |
 
 See [SECURITY.md](SECURITY.md) for the threat model and how to report vulnerabilities.
@@ -108,4 +107,5 @@ follow [docs/RELEASING.md](docs/RELEASING.md).
 ## License
 
 VoidArray is licensed under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for third-party
-attributions; the bundled Cinzel font is under the [SIL Open Font License](licenses/OFL-Cinzel.txt).
+attributions; the bundled Cinzel and IBM Plex fonts are under the SIL Open Font License
+([Cinzel](licenses/OFL-Cinzel.txt), [IBM Plex](licenses/OFL-IBM-Plex.txt)).

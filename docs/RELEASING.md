@@ -1,8 +1,9 @@
 # Releasing
 
 Publishing a GitHub release runs [release.yml](../.github/workflows/release.yml), which builds the signed
-Android APK and the Windows EXE and MSI installers and attaches them, with SHA-256 checksums, to the
-release.
+Android APK and the portable Windows ZIP and attaches them, with SHA-256 checksums, to the release. The
+Windows EXE and MSI installers are not published; they can still be built locally with
+`./gradlew :desktopApp:packageExe` or `:desktopApp:packageMsi`.
 
 ## One-time setup: Android signing key
 
@@ -41,15 +42,13 @@ must be created once and kept forever.
 2. Create a release on GitHub with a new tag named `vX.Y.Z`, for example `v1.2.0`.
 3. Publish it. The workflow attaches these files within a few minutes:
    - `VoidArray-X.Y.Z.apk`
-   - `VoidArray-X.Y.Z-setup.exe`
-   - `VoidArray-X.Y.Z.msi`
    - `VoidArray-X.Y.Z-portable.zip`
    - a `.sha256` file for each
 
 ### Version rules
 
-- Tags must be `vX.Y.Z` with numbers only; pre-release suffixes are rejected because Windows installers
-  require a purely numeric version.
+- Tags must be `vX.Y.Z` with numbers only; pre-release suffixes are rejected because jpackage on Windows
+  requires a purely numeric version, for the portable app image as well as the installers.
 - The Android version code is `X*10000 + Y*100 + Z`, so `Y` and `Z` must stay below 100, and every
   release must have a higher version than the last.
 - Local builds use `appVersion` from `gradle.properties`; release builds override it from the tag.

@@ -19,6 +19,8 @@ import io.github.jermainejamesdev.voidarray.protocol.DeviceType
 import io.github.jermainejamesdev.voidarray.protocol.FileMeta
 import io.github.jermainejamesdev.voidarray.protocol.MAX_TEXT_LENGTH
 import io.github.jermainejamesdev.voidarray.protocol.PROTOCOL_VERSION
+import io.github.jermainejamesdev.voidarray.protocol.PairRequest
+import io.github.jermainejamesdev.voidarray.protocol.PairResponse
 import io.github.jermainejamesdev.voidarray.protocol.PrepareRequest
 import io.github.jermainejamesdev.voidarray.protocol.PrepareResponse
 import kotlinx.coroutines.CancellationException
@@ -72,9 +74,10 @@ class TransferEngine(
 ) : TransferController {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val client = TransferClient()
-    private val server = TransferServer(identity.serverSslContext(), ReceiveHandler(), log)
-    private val discovery = DiscoveryService(scope, ::selfInfo, ::onPeerSeen, ::replyViaHttp, log)
+    private val sslContext = identity.sslContext()
+    private val client = TransferClient(sslContext)
+    private val server = TransferServer(sslContext, ReceiveHandler(), log)
+    private val discovery = DiscoveryService(scope, ::selfInfo, ::onAnnouncement, log)
     private val trustStore = TrustStore(appSettings.store)
     private val historyStore = HistoryStore(historyFile)
     private val historyWriter = Dispatchers.IO.limitedParallelism(1)
@@ -128,6 +131,8 @@ class TransferEngine(
     private val receiveLock = Any()
     private var pendingOffer: PendingOffer? = null
     private var activeSession: ReceiveSession? = null
+    private val pendingPairings = ConcurrentHashMap<String, PendingPairing>()
+    private val pairingAttempts = AttemptLimiter(PAIRINGS_PER_MINUTE, PAIRINGS_PER_MINUTE_PER_DEVICE, 60_000L)
 
     /**
      * Checks local network access, then starts the HTTPS server and discovery. Safe to call repeatedly;
@@ -333,7 +338,6 @@ class TransferEngine(
                 totalBytes = handles.sumOf { it.size },
                 text = text,
                 status = TransferStatus.CONNECTING,
-                pairingCode = if (peer.trusted) null else pairingCode(identity.fingerprint, peer.info.fingerprint),
             ),
         )
         val job = scope.launch { runSend(transferId, peer, handles, text) }
@@ -352,10 +356,19 @@ class TransferEngine(
                 ?: throw TransferException("Could not reach ${peer.info.alias}. Check that both devices are on the same network.")
             host = reachableHost
             peerPort = info.port
-            updateTransfer(transferId) { it.copy(status = TransferStatus.WAITING_FOR_ACCEPT) }
+
+            // Commit to a nonce, learn the receiver's, then reveal ours with the offer. Both sides derive the
+            // same code from all four values; see pairingCode for why the order matters.
+            val senderNonce = newPairingNonce(random)
+            val pairing: PairResponse =
+                client.pair(reachableHost, peerPort, pin, PairRequest(pairingCommitment(identity.fingerprint, senderNonce)))
+            val code = pairingCode(identity.fingerprint, pin, senderNonce, pairing.nonce)
+            updateTransfer(transferId) {
+                it.copy(status = TransferStatus.WAITING_FOR_ACCEPT, pairingCode = if (peer.trusted) null else code)
+            }
 
             val metas = handles.mapIndexed { i, h -> FileMeta(id = "f$i", name = h.name, size = h.size) }
-            val request = PrepareRequest(selfInfo(), metas, text)
+            val request = PrepareRequest(selfInfo(), metas, text, pairingId = pairing.pairingId, nonce = senderNonce)
             val response = when (val result = client.prepare(reachableHost, peerPort, pin, request)) {
                 is TransferClient.PrepareResult.Accepted -> result.response
                 TransferClient.PrepareResult.Declined -> {
@@ -454,15 +467,29 @@ class TransferEngine(
         upsertPeer(info, address, PeerSource.DISCOVERED)
     }
 
-    private fun upsertPeer(info: DeviceInfo, address: String, source: PeerSource) {
-        if (info.deviceId == appSettings.deviceId) return
+    /**
+     * Every caller has already confirmed over TLS that the device at [address] holds the key in [info].
+     * Device ids are only claims, though, so a second key claiming a listed id does not replace the listed
+     * device while it is still active, unless the newcomer is the key the user trusted. Otherwise anyone
+     * could flag a trusted device as "key changed" and block sending to it.
+     */
+    private fun upsertPeer(rawInfo: DeviceInfo, address: String, source: PeerSource) {
+        if (rawInfo.deviceId == appSettings.deviceId) return
+        val info = rawInfo.copy(alias = sanitizeAlias(rawInfo.alias))
         val now = System.currentTimeMillis()
         _peers.update { peers ->
             val existing = peers.find { it.info.deviceId == info.deviceId }
+            val keyConflict = existing != null && !existing.info.fingerprint.equals(info.fingerprint, ignoreCase = true)
+            if (keyConflict) {
+                val newcomerIsTrusted = trustStore.find(info.deviceId)?.fingerprint.equals(info.fingerprint, ignoreCase = true)
+                val existingActive = now - existing!!.lastSeenMillis < PEER_EXPIRY_MILLIS
+                if (!newcomerIsTrusted && existingActive) return@update peers
+            }
+            val knownAddresses = if (keyConflict) emptyList() else existing?.addresses.orEmpty()
             val updated = withTrust(
                 Peer(
                     info = info,
-                    addresses = (listOf(address) + existing?.addresses.orEmpty()).distinct().take(MAX_PEER_ADDRESSES),
+                    addresses = (listOf(address) + knownAddresses).distinct().take(MAX_PEER_ADDRESSES),
                     source = if (existing?.source == PeerSource.MANUAL) PeerSource.MANUAL else source,
                     lastSeenMillis = now,
                 ),
@@ -480,11 +507,23 @@ class TransferEngine(
         )
     }
 
-    private suspend fun replyViaHttp(info: DeviceInfo, address: String): Boolean =
-        runCatching {
-            val theirs = client.register(address, info.port, info.fingerprint, selfInfo())
-            onPeerSeen(theirs, address)
+    /**
+     * A UDP announcement is unauthenticated, so the peer is only listed once a TLS exchange pinned to the
+     * key it announced succeeds at that address: registering ourselves when it asked for a reply, or
+     * fetching its info when the packet was itself a reply.
+     */
+    private suspend fun onAnnouncement(info: DeviceInfo, address: String, replyRequested: Boolean): Boolean {
+        // Other protocol versions are never listed, so connecting to them would be wasted effort.
+        if (info.protocolVersion != PROTOCOL_VERSION) return true
+        return runCatching {
+            val confirmed = if (replyRequested) {
+                client.register(address, info.port, info.fingerprint, selfInfo())
+            } else {
+                client.info(address, info.port, pin = info.fingerprint, quick = true)
+            }
+            onPeerSeen(confirmed, address)
         }.isSuccess
+    }
 
     /**
      * Last-resort discovery for networks that drop multicast and broadcast: probes every host in each
@@ -548,6 +587,14 @@ class TransferEngine(
 
     private class PendingOffer(val decision: CompletableDeferred<Decision>)
 
+    /** A pairing exchange awaiting its offer: the caller's key, its commitment, and the nonce we answered with. */
+    private class PendingPairing(
+        val fingerprint: String,
+        val commitment: String,
+        val receiverNonce: String,
+        val createdAtMillis: Long,
+    )
+
     private class ReceiveFile(
         val meta: FileMeta,
         val safeName: String,
@@ -560,7 +607,8 @@ class TransferEngine(
     private inner class ReceiveSession(
         val id: String,
         val transferId: String,
-        val senderAddress: String,
+        /** Uploads and cancels are only honored from connections presenting this key. */
+        val senderFingerprint: String,
         val files: Map<String, ReceiveFile>,
         val destination: DestinationFolder,
         val progress: ProgressTracker,
@@ -574,15 +622,48 @@ class TransferEngine(
     private inner class ReceiveHandler : ServerHandler {
         override fun info(): DeviceInfo = selfInfo()
 
-        override fun onRegister(peer: DeviceInfo, remoteAddress: String) = onPeerSeen(peer, remoteAddress)
+        /** The claim is only accepted when it names the key the caller actually presented. */
+        override fun onRegister(peer: DeviceInfo, caller: Caller) {
+            if (peer.fingerprint.equals(caller.fingerprint, ignoreCase = true)) onPeerSeen(peer, caller.address)
+        }
 
-        override suspend fun onPrepare(request: PrepareRequest, remoteAddress: String): PrepareOutcome {
+        override fun onPair(request: PairRequest, caller: Caller): PairOutcome {
+            if (!request.commitment.matches(SHA256_HEX)) return PairOutcome.Invalid("Malformed commitment")
+            val now = System.currentTimeMillis()
+            // Each attempt gives an attacker in the middle one blind guess at the code, so attempts are scarce.
+            if (!pairingAttempts.tryAcquire(caller.fingerprint, now)) return PairOutcome.RateLimited
+            pendingPairings.values.removeIf { now - it.createdAtMillis > PAIRING_TTL_MILLIS }
+            if (pendingPairings.size >= MAX_PENDING_PAIRINGS) return PairOutcome.RateLimited
+            val id = newId()
+            val nonce = newPairingNonce(random)
+            pendingPairings[id] = PendingPairing(caller.fingerprint, request.commitment.lowercase(), nonce, now)
+            return PairOutcome.Started(PairResponse(id, nonce))
+        }
+
+        override suspend fun onPrepare(request: PrepareRequest, caller: Caller): PrepareOutcome {
             val text = request.text?.takeIf { it.isNotBlank() }
             if (request.files.isEmpty() && text == null) return PrepareOutcome.Invalid("Nothing offered")
             if (text != null && text.length > MAX_TEXT_LENGTH) return PrepareOutcome.Invalid("Message too long")
             if (request.files.any { it.size < 0 }) return PrepareOutcome.Invalid("Negative file size")
             if (request.files.distinctBy { it.id }.size != request.files.size) return PrepareOutcome.Invalid("Duplicate file ids")
             if (request.sender.protocolVersion != PROTOCOL_VERSION) return PrepareOutcome.Invalid("Incompatible version")
+            // The TLS handshake proved which key the caller holds; the claimed identity must be that key.
+            if (!request.sender.fingerprint.equals(caller.fingerprint, ignoreCase = true)) {
+                return PrepareOutcome.Forbidden("This offer was not sent by the device it names.")
+            }
+            val sender = request.sender.copy(alias = sanitizeAlias(request.sender.alias), fingerprint = caller.fingerprint)
+
+            // Single use: the pairing is consumed whether or not the offer goes ahead.
+            val pairing = pendingPairings.remove(request.pairingId)
+            val pairingValid = pairing != null &&
+                pairing.fingerprint == caller.fingerprint &&
+                System.currentTimeMillis() - pairing.createdAtMillis <= PAIRING_TTL_MILLIS &&
+                MessageDigest.isEqual(
+                    pairing.commitment.toByteArray(),
+                    pairingCommitment(caller.fingerprint, request.nonce).toByteArray(),
+                )
+            if (!pairingValid) return PrepareOutcome.Invalid("Pairing failed. Send again.")
+            val code = pairingCode(caller.fingerprint, identity.fingerprint, request.nonce, pairing!!.receiverNonce)
 
             val pending = PendingOffer(CompletableDeferred())
             synchronized(receiveLock) {
@@ -590,19 +671,14 @@ class TransferEngine(
                 pendingOffer = pending
             }
             try {
-                onPeerSeen(request.sender, remoteAddress)
-                val sender = request.sender
-                // Calling back to the sender's own server with its claimed key pinned proves the request came
-                // from the holder of that key; without it anyone on the LAN could claim a trusted device's id.
-                val verified = runCatching { client.info(remoteAddress, sender.port, pin = sender.fingerprint, quick = true) }
-                    .getOrNull()?.deviceId == sender.deviceId
+                onPeerSeen(sender, caller.address)
                 val trustedRecord = trustStore.find(sender.deviceId)
                 val identityChanged = trustedRecord != null && !trustedRecord.fingerprint.equals(sender.fingerprint, ignoreCase = true)
-                val trusted = verified && trustedRecord != null && !identityChanged
+                val trusted = trustedRecord != null && !identityChanged
 
                 val files = request.files.map { meta ->
                     val safe = sanitizeFileName(meta.name)
-                    ReceiveFile(meta, safe, partialFileName(sender.deviceId, safe, meta.size), newToken())
+                    ReceiveFile(meta, safe, partialFileName(sender.fingerprint, safe, meta.size), newToken())
                 }
                 val decision = if (trusted && _settings.value.autoAcceptTrusted) {
                     Decision(accept = true, trust = false)
@@ -610,30 +686,29 @@ class TransferEngine(
                     _incomingOffer.value = IncomingOffer(
                         id = newId(),
                         sender = sender,
-                        senderAddress = remoteAddress,
+                        senderAddress = caller.address,
                         files = files.map { FileSummary(it.safeName, it.meta.size) },
                         text = text,
-                        verified = verified,
                         trusted = trusted,
                         identityChanged = identityChanged,
-                        pairingCode = pairingCode(identity.fingerprint, sender.fingerprint),
+                        pairingCode = code,
                     )
                     withTimeoutOrNull(PROMPT_TIMEOUT_MILLIS) { pending.decision.await() } ?: Decision(false, false)
                 }
                 _incomingOffer.value = null
                 if (!decision.accept) return PrepareOutcome.Declined
-                if (decision.trust && verified) {
+                if (decision.trust) {
                     trustStore.add(TrustedDevice(sender.deviceId, sender.alias, sender.fingerprint, System.currentTimeMillis()))
                     onTrustChanged()
                 }
-                return accept(sender, remoteAddress, files, text)
+                return accept(sender, caller, files, text)
             } finally {
                 _incomingOffer.value = null
                 synchronized(receiveLock) { if (pendingOffer === pending) pendingOffer = null }
             }
         }
 
-        private fun accept(sender: DeviceInfo, remoteAddress: String, files: List<ReceiveFile>, text: String?): PrepareOutcome {
+        private fun accept(sender: DeviceInfo, caller: Caller, files: List<ReceiveFile>, text: String?): PrepareOutcome {
             val transferId = newId()
             val summaries = files.map { FileSummary(it.safeName, it.meta.size) }
             if (files.isEmpty()) {
@@ -676,7 +751,7 @@ class TransferEngine(
             val session = ReceiveSession(
                 id = newId(),
                 transferId = transferId,
-                senderAddress = remoteAddress,
+                senderFingerprint = caller.fingerprint,
                 files = files.associateBy { it.meta.id },
                 destination = folder,
                 progress = ProgressTracker(transferId, alreadyThere),
@@ -696,13 +771,13 @@ class TransferEngine(
             fileId: String,
             token: String,
             offset: Long,
-            remoteAddress: String,
+            caller: Caller,
             body: InputStream,
         ): UploadOutcome {
             val session = synchronized(receiveLock) { activeSession }?.takeIf { it.id == sessionId }
                 ?: return UploadOutcome.Rejected(404, "The receiver ended this transfer")
-            // Defense in depth on top of TLS: tokens are bound to the session, and the session to the sender's address.
-            if (session.senderAddress != remoteAddress) return UploadOutcome.Rejected(403, "Wrong sender")
+            // The session belongs to the key that was offered and accepted; tokens are a second check on top.
+            if (session.senderFingerprint != caller.fingerprint) return UploadOutcome.Rejected(403, "Wrong sender")
             val file = session.files[fileId] ?: return UploadOutcome.Rejected(404, "Unknown file")
             if (!MessageDigest.isEqual(file.token.toByteArray(), token.toByteArray())) {
                 return UploadOutcome.Rejected(403, "Invalid token")
@@ -750,9 +825,9 @@ class TransferEngine(
             return UploadOutcome.Ok
         }
 
-        override fun onCancel(sessionId: String, remoteAddress: String) {
+        override fun onCancel(sessionId: String, caller: Caller) {
             val session = synchronized(receiveLock) { activeSession }
-                ?.takeIf { it.id == sessionId && it.senderAddress == remoteAddress } ?: return
+                ?.takeIf { it.id == sessionId && it.senderFingerprint == caller.fingerprint } ?: return
             endSession(session, TransferStatus.CANCELLED, "Cancelled by sender", discardPartials = true)
         }
     }
@@ -862,12 +937,44 @@ class TransferEngine(
         const val MAX_SWEEP_SUBNETS = 3
         const val SWEEP_CONCURRENCY = 48
 
+        // An attacker in the middle must match a code the sender is showing, which lasts one prompt (two
+        // minutes), so these caps leave it a few dozen one-in-a-million guesses at most.
+        const val PAIRINGS_PER_MINUTE = 20
+        const val PAIRINGS_PER_MINUTE_PER_DEVICE = 6
+        // The sender sends its offer immediately after pairing, so a pairing older than this was abandoned.
+        const val PAIRING_TTL_MILLIS = 30_000L
+        const val MAX_PENDING_PAIRINGS = 16
+        val SHA256_HEX = Regex("[0-9a-fA-F]{64}")
+
         val timestampFormatter: DateTimeFormatter =
             DateTimeFormatter.ofLocalizedDateTime(FormatStyle.MEDIUM, FormatStyle.SHORT).withZone(ZoneId.systemDefault())
     }
 }
 
 private class InterruptedTransfer(reason: String) : CancellationException(reason)
+
+/**
+ * Sliding-window limit on attempts, overall and per key. The overall limit is checked first, so the
+ * per-key table never holds more entries than [total] however many keys an attacker generates.
+ */
+internal class AttemptLimiter(private val total: Int, private val perKey: Int, private val windowMillis: Long) {
+    private val all = ArrayDeque<Long>()
+    private val byKey = HashMap<String, ArrayDeque<Long>>()
+
+    @Synchronized
+    fun tryAcquire(key: String, nowMillis: Long): Boolean {
+        val cutoff = nowMillis - windowMillis
+        while (all.isNotEmpty() && all.first() <= cutoff) all.removeFirst()
+        byKey.values.forEach { times -> while (times.isNotEmpty() && times.first() <= cutoff) times.removeFirst() }
+        byKey.values.removeAll { it.isEmpty() }
+        if (all.size >= total) return false
+        val mine = byKey.getOrPut(key) { ArrayDeque() }
+        if (mine.size >= perKey) return false
+        all.addLast(nowMillis)
+        mine.addLast(nowMillis)
+        return true
+    }
+}
 
 internal fun Throwable.friendlyMessage(): String = when (this) {
     is TransferException -> message ?: "Transfer failed"

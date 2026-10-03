@@ -19,12 +19,15 @@
     <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
 
     <!--
-        allowBackup is off so a restore onto a new phone cannot clone this install's device id and key,
-        which would make the two phones filter each other out as "self".
+        Backup is off so a restore onto a new phone cannot clone this install's device id and key, which
+        would make the two phones filter each other out as "self" and let either impersonate the other.
+        allowBackup covers Android 11 and below; dataExtractionRules also covers device-to-device
+        transfer on Android 12+, which allowBackup alone does not stop.
     -->
     <application
         android:name=".VoidArrayApplication"
         android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"

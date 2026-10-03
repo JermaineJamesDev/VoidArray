@@ -1,27 +1,21 @@
 package io.github.jermainejamesdev.voidarray.ui
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -29,7 +23,12 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -51,47 +50,74 @@ internal fun SendContentCard(
     val hasContent = staged.isNotEmpty() || stagedText.isNotBlank()
     SectionCard(
         title = "What to send",
-        subtitle = if (staged.isEmpty()) null else "${staged.size} file(s), ${formatBytes(staged.sumOf { it.size })}",
-        action = { if (hasContent) TextButton(onClick = onClear) { Text("Clear") } },
+        subtitle = if (staged.isEmpty()) "Files, a message, or both" else "${countLabel(staged.size, "file")} · ${formatBytes(staged.sumOf { it.size })}",
+        action = { if (hasContent) QuietButton("Clear", onClick = onClear) },
     ) {
-        if (staged.isEmpty()) {
-            EmptyState(
-                icon = AppIcons.File,
-                title = "No files selected",
-                body = if (supportsDragAndDrop) "Add files, or drop them onto this window." else "Add files, or share them to VoidArray from another app.",
-            )
-        } else {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        if (staged.isNotEmpty()) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 staged.forEachIndexed { index, file ->
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        IconBadge(AppIcons.File, size = 36.dp)
+                    InsetRow {
+                        IconTile(fileIcon(file.name), tone = Tone.GOLD, size = 36.dp)
                         Column(modifier = Modifier.weight(1f)) {
-                            Text(file.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(file.name, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Text(
                                 formatBytes(file.size),
                                 style = MaterialTheme.typography.bodySmall,
+                                fontFamily = VoidArrayTheme.extras.mono,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
-                        IconButton(onClick = { onRemove(index) }) { Icon(AppIcons.Close, contentDescription = "Remove ${file.name}") }
+                        IconButton(onClick = { onRemove(index) }) {
+                            Icon(AppIcons.Close, contentDescription = "Remove ${file.name}", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
                     }
                 }
             }
         }
-        FilledTonalButton(onClick = onAddFiles) {
-            Icon(AppIcons.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(8.dp))
-            Text("Add files")
+
+        if (supportsDragAndDrop) {
+            Row(
+                modifier = Modifier.fillMaxWidth().dashedOutline(MaterialTheme.colorScheme.secondary.copy(alpha = 0.4f))
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                FormationArray(modifier = Modifier.size(28.dp), spinning = false)
+                Text(
+                    if (staged.isEmpty()) "Drop files anywhere on this window" else "Drop more files here",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
+                SecondaryButton("Add files", onClick = onAddFiles, icon = AppIcons.Add)
+            }
+        } else {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                SecondaryButton("Add files", onClick = onAddFiles, icon = AppIcons.Add)
+                if (staged.isEmpty()) {
+                    Text(
+                        "Or share files to VoidArray from another app.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
         }
-        OutlinedTextField(
-            value = stagedText,
-            onValueChange = onTextChange,
-            label = { Text("Message or link (optional)") },
-            leadingIcon = { Icon(AppIcons.Message, contentDescription = null) },
-            minLines = 1,
-            maxLines = 4,
-            modifier = Modifier.fillMaxWidth(),
-        )
+
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Message or link", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            OutlinedTextField(
+                value = stagedText,
+                onValueChange = onTextChange,
+                placeholder = { Text("Optional: a note, or a link to open on the other device") },
+                minLines = 1,
+                maxLines = 4,
+                shape = MaterialTheme.shapes.small,
+                colors = fieldColors(),
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
     }
 }
 
@@ -104,35 +130,38 @@ internal fun DevicesCard(
     onSend: (Peer) -> Unit,
     onRescan: () -> Unit,
     onAddManual: (String, Int) -> Unit,
+    onReview: () -> Unit,
 ) {
     var host by rememberSaveable { mutableStateOf("") }
     var port by rememberSaveable { mutableStateOf(DEFAULT_PORT.toString()) }
     var showManual by rememberSaveable { mutableStateOf(false) }
 
     SectionCard(
-        title = "Send to",
-        subtitle = if (canSend) "Tap a device to send" else "Choose files or type a message first",
+        title = "Nearby devices",
+        subtitle = when {
+            peers.isEmpty() -> null
+            canSend -> "${countLabel(peers.size, "device")} on this network"
+            else -> "Choose files or type a message first"
+        },
         action = {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                if (scanning) {
-                    FormationArray(modifier = Modifier.size(24.dp), periodMillis = 3_000)
-                    Spacer(Modifier.width(8.dp))
-                }
-                IconButton(onClick = onRescan, enabled = enabled && !scanning) {
-                    Icon(AppIcons.Refresh, contentDescription = "Scan for devices")
-                }
+                if (scanning) FormationArray(modifier = Modifier.size(22.dp).padding(end = 2.dp), periodMillis = 3_000)
+                SecondaryButton("Scan", onClick = onRescan, enabled = enabled && !scanning, icon = AppIcons.Refresh)
             }
         },
     ) {
         if (peers.isEmpty()) {
             EmptyState(
                 icon = AppIcons.Computer,
-                title = if (enabled) "Forming the array..." else "The array is closed",
-                body = "Searching this network for other VoidArray devices. Open VoidArray on the other device, or add it by IP address.",
-                art = { FormationArray(modifier = Modifier.size(72.dp), spinning = enabled, periodMillis = 8_000) },
+                title = if (enabled) "Forming the array" else "Not receiving",
+                body = "Looking for other VoidArray devices on this network. Open VoidArray on the other device, or add it by IP address.",
+                art = { FormationArray(modifier = Modifier.size(64.dp), spinning = enabled, periodMillis = 8_000) },
             )
+        } else {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                peers.forEach { peer -> PeerRow(peer, canSend = canSend, onSend = { onSend(peer) }, onReview = onReview) }
+            }
         }
-        peers.forEach { peer -> PeerRow(peer, enabled = canSend && !peer.identityChanged, onClick = { onSend(peer) }) }
 
         if (showManual) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -142,6 +171,8 @@ internal fun DevicesCard(
                     label = { Text("IP address") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                    shape = MaterialTheme.shapes.small,
+                    colors = fieldColors(),
                     modifier = Modifier.weight(1f),
                 )
                 OutlinedTextField(
@@ -150,12 +181,15 @@ internal fun DevicesCard(
                     label = { Text("Port") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    shape = MaterialTheme.shapes.small,
+                    colors = fieldColors(),
                     modifier = Modifier.width(100.dp),
                 )
             }
             val portNumber = port.toIntOrNull()?.takeIf { it in 1..65535 }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
+                PrimaryButton(
+                    "Add device",
                     onClick = {
                         if (portNumber != null) {
                             onAddManual(host, portNumber)
@@ -164,55 +198,83 @@ internal fun DevicesCard(
                         }
                     },
                     enabled = enabled && host.isNotBlank() && portNumber != null,
-                ) { Text("Add device") }
-                TextButton(onClick = { showManual = false }) { Text("Cancel") }
+                )
+                QuietButton("Cancel", onClick = { showManual = false })
             }
         } else {
-            OutlinedButton(onClick = { showManual = true }, enabled = enabled) { Text("Add by IP address") }
+            QuietButton("Add a device by IP address", onClick = { showManual = true }, enabled = enabled, icon = AppIcons.Add)
         }
     }
 }
 
 @Composable
-private fun PeerRow(peer: Peer, enabled: Boolean, onClick: () -> Unit) {
+private fun PeerRow(peer: Peer, canSend: Boolean, onSend: () -> Unit, onReview: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
-    Card(
-        modifier = Modifier.fillMaxWidth().clickable(enabled = enabled, onClick = onClick),
-        shape = MaterialTheme.shapes.medium,
-        colors = CardDefaults.cardColors(containerColor = scheme.surfaceContainerHigh),
-        border = if (peer.trusted) BorderStroke(1.dp, scheme.primary.copy(alpha = 0.5f)) else null,
-    ) {
-        Row(
-            modifier = Modifier.padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            IconBadge(deviceIcon(peer.info.deviceType), container = scheme.primaryContainer, content = scheme.onPrimaryContainer, size = 44.dp)
-            Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(peer.info.alias, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    if (peer.trusted) {
-                        Icon(AppIcons.Lock, contentDescription = "Trusted", tint = scheme.primary, modifier = Modifier.size(16.dp))
-                    }
-                }
-                val detail = when {
-                    peer.identityChanged -> "Security key changed. Remove it from trusted devices in Settings if expected."
-                    else -> listOfNotNull(
-                        peer.addresses.firstOrNull(),
-                        if (peer.source == PeerSource.MANUAL) "added by IP" else null,
-                    ).joinToString("  ·  ")
-                }
-                Text(
-                    detail,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (peer.identityChanged) scheme.error else scheme.onSurfaceVariant,
-                )
-            }
-            Icon(
-                AppIcons.Send,
-                contentDescription = "Send to ${peer.info.alias}",
-                tint = if (enabled) scheme.primary else scheme.outline,
-            )
+    val chip = @Composable {
+        when {
+            peer.identityChanged -> StatusChip("Key changed", Tone.DANGER, icon = AppIcons.Warning)
+            peer.trusted -> StatusChip("Trusted", Tone.JADE, icon = AppIcons.Lock)
+            else -> StatusChip("New", Tone.NEUTRAL)
         }
     }
+    BoxWithConstraints {
+        // On a phone the name needs the whole line, so the status chip drops to the detail line.
+        val compact = maxWidth < 440.dp
+        InsetRow(contentPadding = PaddingValues(start = 14.dp, top = 12.dp, end = 12.dp, bottom = 12.dp)) {
+            IconTile(deviceIcon(peer.info.deviceType), tone = if (peer.identityChanged) Tone.DANGER else Tone.JADE, size = 42.dp)
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        peer.info.alias,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    if (!compact) chip()
+                }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (compact) chip()
+                    if (peer.identityChanged) {
+                        Text("Sending is paused. Review it in Settings.", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+                    } else {
+                        Text(
+                            listOfNotNull(peer.addresses.firstOrNull(), if (peer.source == PeerSource.MANUAL) "added by IP" else null)
+                                .joinToString(" · "),
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = VoidArrayTheme.extras.mono,
+                            color = scheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+            if (peer.identityChanged) {
+                SecondaryButton("Review", onClick = onReview)
+            } else {
+                PrimaryButton("Send", onClick = onSend, enabled = canSend, icon = if (compact) null else AppIcons.Send)
+            }
+        }
+    }
+}
+
+@Composable
+internal fun fieldColors() = OutlinedTextFieldDefaults.colors(
+    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainer,
+    focusedContainerColor = MaterialTheme.colorScheme.surfaceContainer,
+    unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
+)
+
+internal fun countLabel(count: Int, noun: String): String = if (count == 1) "1 $noun" else "$count ${noun}s"
+
+/** A dashed rectangle marking a drop target; Compose borders cannot be dashed. */
+private fun Modifier.dashedOutline(color: Color): Modifier = drawBehind {
+    val stroke = 1.5.dp.toPx()
+    drawRect(
+        color = color,
+        topLeft = Offset(stroke / 2, stroke / 2),
+        size = Size(size.width - stroke, size.height - stroke),
+        style = Stroke(width = stroke, pathEffect = PathEffect.dashPathEffect(floatArrayOf(6.dp.toPx(), 4.dp.toPx()))),
+    )
 }
