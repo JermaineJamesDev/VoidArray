@@ -9,12 +9,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -116,7 +115,7 @@ internal fun DevicesCard(
         action = {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (scanning) {
-                    CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                    FormationArray(modifier = Modifier.size(24.dp), periodMillis = 3_000)
                     Spacer(Modifier.width(8.dp))
                 }
                 IconButton(onClick = onRescan, enabled = enabled && !scanning) {
@@ -128,8 +127,9 @@ internal fun DevicesCard(
         if (peers.isEmpty()) {
             EmptyState(
                 icon = AppIcons.Computer,
-                title = "No devices found yet",
-                body = "Open VoidArray on the other device and keep both on the same network.",
+                title = if (enabled) "Forming the array..." else "The array is closed",
+                body = "Searching this network for other VoidArray devices. Open VoidArray on the other device, or add it by IP address.",
+                art = { FormationArray(modifier = Modifier.size(72.dp), spinning = enabled, periodMillis = 8_000) },
             )
         }
         peers.forEach { peer -> PeerRow(peer, enabled = canSend && !peer.identityChanged, onClick = { onSend(peer) }) }
@@ -178,8 +178,9 @@ private fun PeerRow(peer: Peer, enabled: Boolean, onClick: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
     Card(
         modifier = Modifier.fillMaxWidth().clickable(enabled = enabled, onClick = onClick),
-        shape = RoundedCornerShape(16.dp),
+        shape = MaterialTheme.shapes.medium,
         colors = CardDefaults.cardColors(containerColor = scheme.surfaceContainerHigh),
+        border = if (peer.trusted) BorderStroke(1.dp, scheme.primary.copy(alpha = 0.5f)) else null,
     ) {
         Row(
             modifier = Modifier.padding(12.dp),

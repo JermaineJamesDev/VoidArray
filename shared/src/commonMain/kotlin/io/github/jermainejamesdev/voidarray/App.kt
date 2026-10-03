@@ -1,5 +1,6 @@
 package io.github.jermainejamesdev.voidarray
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -17,12 +18,12 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
@@ -32,6 +33,8 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -46,6 +49,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import io.github.jermainejamesdev.voidarray.core.LocalStatus
@@ -61,6 +65,8 @@ import io.github.jermainejamesdev.voidarray.ui.BannerKind
 import io.github.jermainejamesdev.voidarray.ui.DeviceSettingsCard
 import io.github.jermainejamesdev.voidarray.ui.DevicesCard
 import io.github.jermainejamesdev.voidarray.ui.EmptyState
+import io.github.jermainejamesdev.voidarray.ui.FormationArray
+import io.github.jermainejamesdev.voidarray.ui.InkDivider
 import io.github.jermainejamesdev.voidarray.ui.VoidArrayTheme
 import io.github.jermainejamesdev.voidarray.ui.HistoryHeader
 import io.github.jermainejamesdev.voidarray.ui.HistoryRow
@@ -73,7 +79,7 @@ import io.github.jermainejamesdev.voidarray.ui.SecuritySettingsCard
 import io.github.jermainejamesdev.voidarray.ui.SendContentCard
 import io.github.jermainejamesdev.voidarray.ui.TransferCard
 
-private enum class Destination(val label: String, val icon: ImageVector) {
+internal enum class Destination(val label: String, val icon: ImageVector) {
     SEND("Send", AppIcons.Send),
     RECEIVE("Receive", AppIcons.Download),
     HISTORY("History", AppIcons.History),
@@ -86,12 +92,33 @@ private enum class Destination(val label: String, val icon: ImageVector) {
  */
 @Composable
 fun App(controller: TransferController, actions: PlatformActions, isDropTarget: Boolean = false) {
+    AppRoot(controller, actions, isDropTarget, Destination.SEND)
+}
+
+/** [App] with a chosen starting screen, for the screenshot renderer. */
+@Composable
+internal fun AppRoot(
+    controller: TransferController,
+    actions: PlatformActions,
+    isDropTarget: Boolean,
+    startDestination: Destination,
+) {
     val settings by controller.settings.collectAsState()
-    VoidArrayTheme(settings.theme) {
+    VoidArrayTheme(settings.theme, reduceMotion = actions.reduceMotion) {
         Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
             val transfers by controller.transfers.collectAsState()
             val offer by controller.incomingOffer.collectAsState()
-            var destination by rememberSaveable { mutableStateOf(Destination.SEND) }
+            val local by controller.local.collectAsState()
+            var destination by rememberSaveable { mutableStateOf(startDestination) }
+
+            // Notices are transient ("Copied", "Could not reach..."), so they appear as snackbars that stay
+            // visible regardless of scroll position, then clear themselves.
+            val snackbar = remember { SnackbarHostState() }
+            LaunchedEffect(local.notice) {
+                val notice = local.notice ?: return@LaunchedEffect
+                snackbar.showSnackbar(notice, withDismissAction = true)
+                controller.dismissNotice()
+            }
 
             // Jump to Receive when an incoming transfer starts so its progress is visible right away.
             val activeIncoming = transfers.filter { it.direction == TransferDirection.RECEIVE && it.isActive }.map { it.id }
@@ -113,12 +140,10 @@ fun App(controller: TransferController, actions: PlatformActions, isDropTarget: 
                     Row(modifier = Modifier.fillMaxSize()) {
                         NavigationRail(
                             header = {
-                                IconBadge(
-                                    AppIcons.Send,
-                                    modifier = Modifier.padding(vertical = 12.dp),
-                                    container = MaterialTheme.colorScheme.primary,
-                                    content = MaterialTheme.colorScheme.onPrimary,
-                                    size = 48.dp,
+                                Image(
+                                    rememberVectorPainter(AppIcons.Logo),
+                                    contentDescription = "VoidArray",
+                                    modifier = Modifier.padding(vertical = 12.dp).size(48.dp),
                                 )
                             },
                         ) {
@@ -133,12 +158,14 @@ fun App(controller: TransferController, actions: PlatformActions, isDropTarget: 
                         }
                         Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
                             DestinationContent(destination, controller, actions, twoColumn)
+                            SnackbarHost(snackbar, modifier = Modifier.align(Alignment.BottomCenter))
                         }
                     }
                 } else {
                     Column(modifier = Modifier.fillMaxSize().imePadding()) {
                         Box(modifier = Modifier.weight(1f)) {
                             DestinationContent(destination, controller, actions, twoColumn = false)
+                            SnackbarHost(snackbar, modifier = Modifier.align(Alignment.BottomCenter))
                         }
                         NavigationBar {
                             Destination.entries.forEach { item ->
@@ -203,7 +230,12 @@ private fun DestinationContent(
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             if (destination != Destination.HISTORY) {
-                item { ScreenTitle(destination.label) }
+                item {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        ScreenTitle(destination.label)
+                        InkDivider(modifier = Modifier.widthIn(max = 220.dp))
+                    }
+                }
             }
             statusBanners(local, controller, actions)
 
@@ -264,8 +296,8 @@ private fun DestinationContent(
                         item {
                             EmptyState(
                                 icon = AppIcons.History,
-                                title = "No transfers yet",
-                                body = "Files and messages you send or receive will be listed here.",
+                                title = "No records yet",
+                                body = "Files and messages you send or receive are recorded here.",
                             )
                         }
                     }
@@ -328,9 +360,6 @@ private fun LazyListScope.statusBanners(local: LocalStatus, controller: Transfer
     local.networkWarning?.let { warning ->
         item(key = "networkWarning") { Banner(warning, BannerKind.WARNING) }
     }
-    local.notice?.let { notice ->
-        item(key = "notice") { Banner(notice, BannerKind.INFO, onDismiss = controller::dismissNotice) }
-    }
 }
 
 private fun LazyListScope.transferSection(
@@ -360,14 +389,14 @@ private fun LazyListScope.transferSection(
 private fun DropOverlay() {
     val scheme = MaterialTheme.colorScheme
     Box(
-        modifier = Modifier.fillMaxSize().background(scheme.surface.copy(alpha = 0.85f)).padding(24.dp)
-            .border(3.dp, scheme.primary, RoundedCornerShape(24.dp)),
+        modifier = Modifier.fillMaxSize().background(scheme.surface.copy(alpha = 0.88f)).padding(24.dp)
+            .border(2.dp, scheme.secondary, MaterialTheme.shapes.extraLarge),
         contentAlignment = Alignment.Center,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            IconBadge(AppIcons.Add, size = 72.dp, container = scheme.primaryContainer, content = scheme.onPrimaryContainer)
+            FormationArray(modifier = Modifier.size(160.dp), periodMillis = 4_000)
             Text(
-                "Drop files to send",
+                "Release to gather these files",
                 style = MaterialTheme.typography.headlineSmall,
                 modifier = Modifier.padding(top = 16.dp),
             )

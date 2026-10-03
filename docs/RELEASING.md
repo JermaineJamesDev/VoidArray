@@ -43,6 +43,7 @@ must be created once and kept forever.
    - `VoidArray-X.Y.Z.apk`
    - `VoidArray-X.Y.Z-setup.exe`
    - `VoidArray-X.Y.Z.msi`
+   - `VoidArray-X.Y.Z-portable.zip`
    - a `.sha256` file for each
 
 ### Version rules

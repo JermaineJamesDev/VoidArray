@@ -1,8 +1,10 @@
 name: Release
 
-# Publishing a GitHub release tagged vX.Y.Z builds the signed Android APK and the Windows EXE and MSI
-# installers, then attaches them (with SHA-256 checksums) to that release. Running it manually builds the
-# same files as workflow artifacts without touching any release, which is useful for testing.
+# Publishing a GitHub release tagged vX.Y.Z builds the signed Android APK, the Windows EXE and MSI
+# installers, and a portable Windows ZIP, then attaches them (with SHA-256 checksums) to that release.
+# Running it manually builds the same files as workflow artifacts without touching any release, which is
+# useful for testing.
+
 on:
   release:
     types: [published]
@@ -112,14 +114,15 @@ jobs:
           echo "APP_VERSION=$version" >> "$GITHUB_ENV"
 
       # The non-"Release" packaging tasks skip ProGuard, which would need keep rules for Ktor and serialization.
-      - name: Build EXE and MSI
-        run: ./gradlew :desktopApp:packageExe :desktopApp:packageMsi -PappVersion="$APP_VERSION"
+      - name: Build EXE, MSI and portable ZIP
+        run: ./gradlew :desktopApp:packageExe :desktopApp:packageMsi :desktopApp:packagePortableZip -PappVersion="$APP_VERSION"
 
       - name: Collect installers
         run: |
           mkdir dist
           cp desktopApp/build/compose/binaries/main/exe/*.exe "dist/VoidArray-$APP_VERSION-setup.exe"
           cp desktopApp/build/compose/binaries/main/msi/*.msi "dist/VoidArray-$APP_VERSION.msi"
+          cp desktopApp/build/compose/binaries/main/portable/*.zip "dist/"
           cd dist
           for file in *; do sha256sum "$file" > "$file.sha256"; done
 

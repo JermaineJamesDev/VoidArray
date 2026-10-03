@@ -76,8 +76,13 @@ object AppIcons {
         )
     }
 
-    /** Full-color app mark (brand circle with a send arrow) for window and tray icons, which are not tinted. */
+    /**
+     * Full-color app mark for window and tray icons, which are not tinted: a formation array of a gold
+     * ring and eight-pointed star around a jade core, on the void.
+     */
     val Logo by lazy {
+        val gold = SolidColor(Color(0xFFC9A45C))
+        val jade = SolidColor(Color(0xFF5FC9A3))
         ImageVector.Builder(
             name = "Logo",
             defaultWidth = 24.dp,
@@ -85,8 +90,12 @@ object AppIcons {
             viewportWidth = 24f,
             viewportHeight = 24f,
         )
-            .addPath(pathData = addPathNodes("M12,0a12,12 0,1 1,0 24a12,12 0,1 1,0 -24z"), fill = SolidColor(Color(0xFF006A6A)))
-            .addPath(pathData = addPathNodes("M6.5,17.5L19,12 6.5,6.5 6.5,10.5l8,1.5 -8,1.5z"), fill = SolidColor(Color.White))
+            .addPath(pathData = addPathNodes("M12,0a12,12 0,1 1,0 24a12,12 0,1 1,0 -24z"), fill = SolidColor(Color(0xFF0B0D14)))
+            .addPath(pathData = addPathNodes("M12,1.4a10.6,10.6 0,1 1,0 21.2a10.6,10.6 0,1 1,0 -21.2z"), stroke = gold, strokeLineWidth = 0.8f)
+            .addPath(pathData = addPathNodes("M20.2,12L12,20.2L3.8,12L12,3.8Z"), stroke = gold, strokeLineWidth = 0.8f)
+            .addPath(pathData = addPathNodes("M17.8,17.8L6.2,17.8L6.2,6.2L17.8,6.2Z"), stroke = gold, strokeLineWidth = 0.8f)
+            .addPath(pathData = addPathNodes("M12,8a4,4 0,1 1,0 8a4,4 0,1 1,0 -8z"), stroke = jade, strokeLineWidth = 1f)
+            .addPath(pathData = addPathNodes("M12,10.5a1.5,1.5 0,1 1,0 3a1.5,1.5 0,1 1,0 -3z"), fill = jade)
             .build()
     }
 

@@ -30,6 +30,18 @@ transfer logic go in `engine`, UI in `shared`, and platform glue in `androidApp`
   mixed versions cannot interoperate.
 - New dependencies should be discussed in the issue or pull request first.
 
+## UI changes and screenshots
+
+`ScreenshotRenderer` renders the real UI with sample data, without a device or window, to
+`shared/build/screenshots`:
+
+```bash
+./gradlew :shared:jvmTest --tests '*ScreenshotRenderer*' -Pscreenshots=true
+```
+
+Attach before and after images to UI pull requests. Copy updated images into `docs/screenshots` when the
+README ones go stale.
+
 ## Before opening a pull request
 
 Run the same checks as CI:

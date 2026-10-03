@@ -1,28 +1,28 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The formation-array mark (see AppIcons.Logo), scaled 2.6x into the adaptive icon's 66dp safe zone. -->
+<!-- Single-color variant for Android 13+ themed icons; the launcher tints it. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
     <path
-        android:strokeColor="#C9A45C"
+        android:strokeColor="#FFFFFF"
         android:strokeWidth="2.2"
         android:pathData="M54,26.44a27.56,27.56 0,1 1,0 55.12a27.56,27.56 0,1 1,0 -55.12z" />
     <path
-        android:strokeColor="#C9A45C"
+        android:strokeColor="#FFFFFF"
         android:strokeWidth="2.2"
         android:strokeLineJoin="miter"
         android:pathData="M75.32,54L54,75.32L32.68,54L54,32.68Z" />
     <path
-        android:strokeColor="#C9A45C"
+        android:strokeColor="#FFFFFF"
         android:strokeWidth="2.2"
         android:pathData="M69.07,69.07L38.93,69.07L38.93,38.93L69.07,38.93Z" />
     <path
-        android:strokeColor="#5FC9A3"
+        android:strokeColor="#FFFFFF"
         android:strokeWidth="2.6"
         android:pathData="M54,43.6a10.4,10.4 0,1 1,0 20.8a10.4,10.4 0,1 1,0 -20.8z" />
     <path
-        android:fillColor="#5FC9A3"
+        android:fillColor="#FFFFFF"
         android:pathData="M54,50.1a3.9,3.9 0,1 1,0 7.8a3.9,3.9 0,1 1,0 -7.8z" />
 </vector>

@@ -5,7 +5,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
@@ -25,19 +26,29 @@ internal fun ReceiveStatusCard(local: LocalStatus, deviceType: DeviceType) {
     val scheme = MaterialTheme.colorScheme
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(24.dp),
-        colors = CardDefaults.cardColors(containerColor = scheme.primaryContainer, contentColor = scheme.onPrimaryContainer),
+        shape = MaterialTheme.shapes.extraLarge,
+        colors = CardDefaults.cardColors(containerColor = scheme.surfaceContainerLow, contentColor = scheme.onSurface),
+        border = goldHairline(),
     ) {
         Column(
             modifier = Modifier.fillMaxWidth().padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            IconBadge(deviceIcon(deviceType), size = 72.dp, container = scheme.primary, content = scheme.onPrimary)
+            Box(contentAlignment = Alignment.Center) {
+                FormationArray(modifier = Modifier.size(168.dp), spinning = local.serverRunning, periodMillis = 40_000)
+                IconBadge(deviceIcon(deviceType), size = 56.dp, container = scheme.primary, content = scheme.onPrimary)
+            }
             Text(local.alias, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
             Text(
                 if (local.serverRunning) "Ready to receive" else "Not receiving",
                 style = MaterialTheme.typography.titleSmall,
+                color = if (local.serverRunning) scheme.primary else scheme.error,
+            )
+            Text(
+                if (local.serverRunning) "The array is open to your devices" else "The array is closed",
+                style = MaterialTheme.typography.bodySmall,
+                color = scheme.onSurfaceVariant,
             )
             if (local.serverRunning) {
                 val endpoints = local.addresses.joinToString("   ") { "$it:${local.port}" }

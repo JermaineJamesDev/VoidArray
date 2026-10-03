@@ -45,6 +45,9 @@ interface PlatformActions {
     val supportsTray: Boolean
     val supportsDragAndDrop: Boolean
 
+    /** The user turned animations off system-wide; decorative motion should stay still. */
+    val reduceMotion: Boolean
+
     fun pickFilesToSend()
     fun pickDestinationFolder()
     fun openReceivedFolder()

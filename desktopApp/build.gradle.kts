@@ -20,6 +20,17 @@ dependencies {
     implementation(libs.compose.uiToolingPreview)
 }
 
+// A no-install build: the createDistributable app folder plus the marker that switches on portable storage.
+tasks.register<Zip>("packagePortableZip") {
+    group = "compose desktop"
+    description = "Packages a portable ZIP that keeps its data next to the executable."
+    dependsOn("createDistributable")
+    from(layout.buildDirectory.dir("compose/binaries/main/app"))
+    from("packaging/portable") { into("VoidArray") }
+    archiveFileName.set(providers.gradleProperty("appVersion").map { "VoidArray-$it-portable.zip" })
+    destinationDirectory.set(layout.buildDirectory.dir("compose/binaries/main/portable"))
+}
+
 compose.desktop {
     application {
         mainClass = "io.github.jermainejamesdev.voidarray.MainKt"

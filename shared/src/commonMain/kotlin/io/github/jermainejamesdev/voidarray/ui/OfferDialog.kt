@@ -40,6 +40,7 @@ internal fun IncomingOfferDialog(
         title = {
             Text(
                 if (offer.isTextOnly) "Message from ${offer.sender.alias}" else "${offer.sender.alias} wants to send you files",
+                style = MaterialTheme.typography.titleLarge,
             )
         },
         text = {
@@ -54,9 +55,9 @@ internal fun IncomingOfferDialog(
                         BannerKind.WARNING,
                     )
                     offer.trusted -> Banner("Trusted device", BannerKind.INFO)
-                    else -> Banner(
-                        "New device. Check that ${offer.sender.alias} shows the code ${offer.pairingCode}.",
-                        BannerKind.INFO,
+                    else -> PairingCodeToken(
+                        code = offer.pairingCode,
+                        caption = "New device. Accept only if ${offer.sender.alias} shows this same code.",
                     )
                 }
 

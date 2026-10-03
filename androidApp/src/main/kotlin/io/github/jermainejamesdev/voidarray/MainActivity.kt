@@ -11,6 +11,7 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
 import android.provider.DocumentsContract
+import android.provider.Settings
 import android.graphics.Color
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -47,6 +48,10 @@ class MainActivity : ComponentActivity() {
         override val appVersion: String = BuildConfig.VERSION_NAME
         override val supportsTray = false
         override val supportsDragAndDrop = false
+
+        // "Remove animations" in accessibility settings sets the animator scale to 0.
+        override val reduceMotion: Boolean
+            get() = Settings.Global.getFloat(contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f
 
         override fun pickFilesToSend() = pickFiles.launch(arrayOf("*/*"))
         override fun pickDestinationFolder() = pickFolder.launch(null)

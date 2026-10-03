@@ -9,7 +9,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -37,8 +37,9 @@ internal fun SectionCard(
 ) {
     Card(
         modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
+        shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+        border = goldHairline(),
     ) {
         Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -75,19 +76,34 @@ internal fun IconBadge(
 internal fun deviceIcon(type: DeviceType): ImageVector =
     if (type == DeviceType.MOBILE) AppIcons.Phone else AppIcons.Computer
 
+/** The thin antique-gold border that frames cards. */
 @Composable
-internal fun EmptyState(icon: ImageVector, title: String, body: String, modifier: Modifier = Modifier) {
+internal fun goldHairline(): BorderStroke =
+    BorderStroke(1.dp, MaterialTheme.colorScheme.secondary.copy(alpha = 0.28f))
+
+@Composable
+internal fun EmptyState(
+    icon: ImageVector,
+    title: String,
+    body: String,
+    modifier: Modifier = Modifier,
+    art: (@Composable () -> Unit)? = null,
+) {
     Column(
         modifier = modifier.fillMaxWidth().padding(vertical = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        IconBadge(
-            icon,
-            size = 56.dp,
-            container = MaterialTheme.colorScheme.surfaceContainerHigh,
-            content = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        if (art != null) {
+            art()
+        } else {
+            IconBadge(
+                icon,
+                size = 56.dp,
+                container = MaterialTheme.colorScheme.surfaceContainerHigh,
+                content = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         Text(title, style = MaterialTheme.typography.titleSmall)
         Text(
             body,
@@ -116,7 +132,7 @@ internal fun Banner(
     }
     Card(
         modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
+        shape = MaterialTheme.shapes.medium,
         colors = CardDefaults.cardColors(containerColor = container, contentColor = onContainer),
     ) {
         Row(

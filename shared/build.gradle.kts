@@ -48,9 +48,18 @@ kotlin {
         commonTest.dependencies {
             implementation(libs.kotlin.test)
         }
+        jvmTest.dependencies {
+            // Native Skia runtime for the headless screenshot renderer (ScreenshotRenderer).
+            implementation(compose.desktop.currentOs)
+        }
     }
 }
 
 dependencies {
     androidRuntimeClasspath(libs.compose.uiTooling)
+}
+
+// Opt-in screenshot rendering (see ScreenshotRenderer): ./gradlew :shared:jvmTest -Pscreenshots=true
+tasks.named<Test>("jvmTest") {
+    providers.gradleProperty("screenshots").orNull?.let { systemProperty("screenshots", it) }
 }

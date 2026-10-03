@@ -9,7 +9,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -70,7 +69,7 @@ internal fun ReceivingSettingsCard(
         SettingRow(title = "Save to", body = destinationLabel) {
             OutlinedButton(onClick = onChangeFolder) { Text("Change") }
         }
-        HorizontalDivider()
+        InkDivider()
         SettingRow(
             title = "Auto-accept from trusted devices",
             body = "Skip the prompt for devices you have trusted. Other devices still ask.",
@@ -107,7 +106,7 @@ internal fun AppearanceSettingsCard(
             }
         }
         if (supportsTray) {
-            HorizontalDivider()
+            InkDivider()
             SettingRow(
                 title = "Keep running in the tray when closed",
                 body = "Closing the window keeps this PC visible to your other devices.",
@@ -136,7 +135,7 @@ internal fun SecuritySettingsCard(
             fontFamily = FontFamily.Monospace,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        HorizontalDivider()
+        InkDivider()
         Text("Trusted devices", style = MaterialTheme.typography.bodyLarge)
         if (trusted.isEmpty()) {
             Text(
@@ -182,7 +181,7 @@ internal fun AboutCard(version: String) {
     val uriHandler = LocalUriHandler.current
     SectionCard(title = "About VoidArray", subtitle = "Version $version") {
         Text(
-            "Open source under the Apache License 2.0. Works entirely on your local network; nothing is sent to the internet.",
+            "Move files across the void between your own devices. Works entirely on your local network; nothing is sent to the internet. Open source under the Apache License 2.0.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

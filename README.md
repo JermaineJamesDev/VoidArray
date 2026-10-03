@@ -30,6 +30,17 @@
 - **Windows:** drag and drop files onto the window; keeps running in the system tray so your PC stays
   reachable.
 
+## Screenshots
+
+<p align="center">
+  <img src="docs/screenshots/send-dark.png" alt="Sending files on desktop" width="100%">
+</p>
+<p align="center">
+  <img src="docs/screenshots/receive-dark-phone.png" alt="Receive screen on a phone" width="24%">
+  <img src="docs/screenshots/offer-dark-phone.png" alt="Accepting files from a new device with a pairing code" width="24%">
+  <img src="docs/screenshots/send-light-phone.png" alt="Send screen in the light theme" width="24%">
+</p>
+
 ## Download
 
 Get the latest build from the [Releases page](https://github.com/JermaineJamesDev/VoidArray/releases/latest).
@@ -39,6 +50,7 @@ Get the latest build from the [Releases page](https://github.com/JermaineJamesDe
 | Android 8.0+ | `VoidArray-X.Y.Z.apk` | Allow installing apps from your browser or file manager when prompted. |
 | Windows 10/11 | `VoidArray-X.Y.Z-setup.exe` | Standard installer. |
 | Windows 10/11 | `VoidArray-X.Y.Z.msi` | For managed or scripted installs. |
+| Windows 10/11 | `VoidArray-X.Y.Z-portable.zip` | No install: unzip anywhere (even a USB drive) and run `VoidArray.exe`. Settings and keys stay in a `data` folder beside it. |
 
 Each file has a matching `.sha256` checksum. The Windows installers are not code-signed yet, so
 SmartScreen may warn on first run; choose **More info > Run anyway**.
@@ -72,6 +84,7 @@ project directly).
 ./gradlew :androidApp:assembleDebug       # build a debug APK
 ./gradlew :engine:test                    # transfer, TLS pinning, trust and resume tests
 ./gradlew :desktopApp:packageExe          # build a Windows installer locally
+./gradlew :desktopApp:packagePortableZip  # build the portable ZIP
 ```
 
 ### Project layout
@@ -95,4 +108,4 @@ follow [docs/RELEASING.md](docs/RELEASING.md).
 ## License
 
 VoidArray is licensed under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for third-party
-attributions.
+attributions; the bundled Cinzel font is under the [SIL Open Font License](licenses/OFL-Cinzel.txt).

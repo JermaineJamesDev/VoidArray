@@ -107,7 +107,11 @@ fun main() {
         ) {
             val scope = rememberCoroutineScope()
             val actions = remember { DesktopActions(window, engine, settings, scope, traySupported) }
-            LaunchedEffect(Unit) { engine.start { true } }
+            LaunchedEffect(Unit) {
+                // Below this the two-pane layout and dialogs stop fitting.
+                window.minimumSize = java.awt.Dimension(420, 560)
+                engine.start { true }
+            }
             LaunchedEffect(Unit) { watchWindowsNetworkProfile(engine) }
 
             // An offer needs an answer within the prompt timeout, so surface the window and notify.
@@ -175,6 +179,9 @@ private class DesktopActions(
     override val supportsTray: Boolean,
 ) : PlatformActions {
     override val supportsDragAndDrop = true
+
+    // There is no portable desktop JVM API for the OS reduced-motion setting.
+    override val reduceMotion = false
 
     // jpackage sets this in installed builds; it is absent when running from Gradle.
     override val appVersion: String = System.getProperty("jpackage.app-version") ?: "development build"
@@ -263,10 +270,19 @@ private suspend fun publicNetworkWarning(): String? = kotlinx.coroutines.withCon
     }.getOrNull()
 }
 
+/**
+ * Portable builds ship [PORTABLE_MARKER] next to the executable; settings, keys and history then live in a
+ * data folder beside it so the app can run from a USB drive without writing to %APPDATA%. jpackage sets
+ * jpackage.app-path to the launcher, so a Gradle run never counts as portable.
+ */
 private fun appDataDir(): File {
+    val launcherDir = System.getProperty("jpackage.app-path")?.let { File(it).parentFile }
+    if (launcherDir != null && File(launcherDir, PORTABLE_MARKER).isFile) return File(launcherDir, "data")
     val appData = System.getenv("APPDATA")
     return if (appData != null) File(appData, "VoidArray") else File(System.getProperty("user.home"), ".voidarray")
 }
+
+private const val PORTABLE_MARKER = "portable.txt"
 
 private fun defaultDownloadDir(): File =
     File(System.getProperty("user.home"), "Downloads${File.separator}VoidArray")

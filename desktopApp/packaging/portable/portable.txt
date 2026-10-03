@@ -1,0 +1,7 @@
+This copy of VoidArray is portable.
+
+Because this file sits next to VoidArray.exe, settings, the device key, trusted devices and transfer history
+are stored in the "data" folder beside it instead of in %APPDATA%. You can run it from any folder or a USB
+drive. Received files still go to the folder chosen in the app (Downloads\VoidArray by default).
+
+Delete this file to make this copy use %APPDATA%\VoidArray like the installed version.

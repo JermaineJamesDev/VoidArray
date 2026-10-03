@@ -5,7 +5,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -29,9 +29,12 @@ import io.github.jermainejamesdev.voidarray.core.TransferStatus
 @Composable
 internal fun HistoryHeader(hasEntries: Boolean, onClear: () -> Unit) {
     var confirming by remember { mutableStateOf(false) }
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Text("History", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-        if (hasEntries) TextButton(onClick = { confirming = true }) { Text("Clear") }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("History", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            if (hasEntries) TextButton(onClick = { confirming = true }) { Text("Clear") }
+        }
+        InkDivider(modifier = Modifier.widthIn(max = 220.dp))
     }
     if (confirming) {
         AlertDialog(
@@ -56,8 +59,9 @@ internal fun HistoryRow(entry: HistoryEntry, onCopy: (String) -> Unit, onOpenFol
     val succeeded = entry.status == TransferStatus.COMPLETED
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
+        shape = MaterialTheme.shapes.medium,
         colors = CardDefaults.cardColors(containerColor = scheme.surfaceContainerLow),
+        border = goldHairline(),
     ) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -89,6 +93,7 @@ internal fun HistoryRow(entry: HistoryEntry, onCopy: (String) -> Unit, onOpenFol
                     ).joinToString("  ·  ")
                     Text(details, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant, maxLines = 2)
                 }
+                if (succeeded) SealStamp()
             }
             if (entry.fileCount > 1) {
                 val names = entry.files.joinToString(", ") { it.name }

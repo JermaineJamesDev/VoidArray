@@ -1,3 +1,5 @@
 <resources>
-    <style name="Theme.VoidArray" parent="android:Theme.Material.NoActionBar" />
+    <style name="Theme.VoidArray" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#0B0D14</item>
+    </style>
 </resources>
