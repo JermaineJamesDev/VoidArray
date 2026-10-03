@@ -1,5 +1,6 @@
 package com.yunjam.eztransfer.engine
 
+import com.yunjam.eztransfer.core.ThemeMode
 import java.io.File
 import java.util.Properties
 import java.util.UUID
@@ -31,7 +32,7 @@ class PropertiesFileStore(private val file: File) : KeyValueStore {
     }
 }
 
-class AppSettings(private val store: KeyValueStore, private val defaultAlias: String) {
+class AppSettings(val store: KeyValueStore, private val defaultAlias: String) {
     val deviceId: String = store.get(KEY_DEVICE_ID) ?: UUID.randomUUID().toString().also {
         store.put(KEY_DEVICE_ID, it)
     }
@@ -45,10 +46,25 @@ class AppSettings(private val store: KeyValueStore, private val defaultAlias: St
         get() = store.get(KEY_DESTINATION)
         set(value) = store.put(KEY_DESTINATION, value)
 
+    var autoAcceptTrusted: Boolean
+        get() = store.get(KEY_AUTO_ACCEPT) == "true"
+        set(value) = store.put(KEY_AUTO_ACCEPT, value.toString())
+
+    var theme: ThemeMode
+        get() = store.get(KEY_THEME)?.let { name -> ThemeMode.entries.find { it.name == name } } ?: ThemeMode.SYSTEM
+        set(value) = store.put(KEY_THEME, value.name)
+
+    var minimizeToTray: Boolean
+        get() = store.get(KEY_TRAY) != "false"
+        set(value) = store.put(KEY_TRAY, value.toString())
+
     private companion object {
         const val KEY_DEVICE_ID = "deviceId"
         const val KEY_ALIAS = "alias"
         const val KEY_DESTINATION = "destination"
+        const val KEY_AUTO_ACCEPT = "autoAcceptTrusted"
+        const val KEY_THEME = "theme"
+        const val KEY_TRAY = "minimizeToTray"
     }
 }
 

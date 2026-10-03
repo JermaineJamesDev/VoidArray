@@ -4,7 +4,8 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
-const val PROTOCOL_VERSION = 1
+/** Version 2 moved the API to HTTPS with SPKI-pinned certificates; version 1 peers cannot interoperate. */
+const val PROTOCOL_VERSION = 2
 
 /** TCP port for the HTTP API and UDP port for discovery. Deliberately not LocalSend's 53317. */
 const val DEFAULT_PORT = 53318
@@ -48,8 +49,8 @@ data class DeviceInfo(
     val deviceType: DeviceType,
     val port: Int,
     val protocolVersion: Int = PROTOCOL_VERSION,
-    /** SPKI fingerprint once TLS is in place; null while the transport is plain HTTP. */
-    val fingerprint: String? = null,
+    /** Uppercase hex SHA-256 of the certificate's SubjectPublicKeyInfo; the identity peers pin to. */
+    val fingerprint: String,
 )
 
 /** UDP discovery payload. [announce] asks receivers to reply so both sides learn each other in one round trip. */
@@ -70,6 +71,8 @@ data class FileMeta(
 data class PrepareRequest(
     val sender: DeviceInfo,
     val files: List<FileMeta>,
+    /** Optional message or link sent along with (or instead of) files. */
+    val text: String? = null,
 )
 
 /**
@@ -82,6 +85,9 @@ data class PrepareResponse(
     val tokens: Map<String, String>,
     val offsets: Map<String, Long>,
 )
+
+/** Longest text message accepted, in characters. */
+const val MAX_TEXT_LENGTH = 64 * 1024
 
 @Serializable
 data class ErrorResponse(

@@ -25,10 +25,9 @@ kotlin {
 
 dependencies {
     api(project(":core"))
-    implementation(libs.ktor.server.core)
-    implementation(libs.ktor.server.cio)
     implementation(libs.ktor.client.core)
     implementation(libs.ktor.client.okhttp)
+    implementation(libs.ktor.tls.certificates)
 
     testImplementation(libs.kotlin.test)
 }

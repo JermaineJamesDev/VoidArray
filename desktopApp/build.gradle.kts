@@ -30,7 +30,9 @@ compose.desktop {
             packageName = "EzTransfer"
             packageVersion = "1.0.0"
             // From :desktopApp:suggestRuntimeModules; jlink drops modules it cannot detect statically.
-            modules("java.instrument", "java.management", "jdk.unsupported")
+            // jdk.crypto.ec is added by hand: TLS loads it through a service provider, which jdeps cannot see,
+            // and without it handshakes lose the ECDHE key exchange.
+            modules("java.instrument", "java.management", "jdk.unsupported", "jdk.crypto.ec")
             windows {
                 // Must never change once a build has shipped, or new MSIs install side by side
                 // instead of upgrading existing installs.

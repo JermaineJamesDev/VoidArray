@@ -1,20 +1,30 @@
 package com.yunjam.eztransfer
 
 import android.Manifest
+import android.content.ActivityNotFoundException
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
+import android.provider.DocumentsContract
+import android.graphics.Color
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.core.content.ContextCompat
 import androidx.core.content.IntentCompat
 import androidx.lifecycle.lifecycleScope
 import com.yunjam.eztransfer.core.PlatformActions
+import com.yunjam.eztransfer.ui.isDarkTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -34,8 +44,36 @@ class MainActivity : ComponentActivity() {
     private var multicastLock: WifiManager.MulticastLock? = null
 
     private val actions = object : PlatformActions {
+        override val supportsTray = false
+        override val supportsDragAndDrop = false
+
         override fun pickFilesToSend() = pickFiles.launch(arrayOf("*/*"))
         override fun pickDestinationFolder() = pickFolder.launch(null)
+
+        override fun openReceivedFolder() {
+            val tree = (app.engine.currentDestination as? SafTreeDestination)?.treeUri
+            if (tree == null) {
+                app.engine.notice("Files are in app storage. Choose a folder under Receive to browse them in your file manager.")
+                return
+            }
+            val folder = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
+            val intent = Intent(Intent.ACTION_VIEW)
+                .setDataAndType(folder, DocumentsContract.Document.MIME_TYPE_DIR)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            try {
+                startActivity(intent)
+            } catch (_: ActivityNotFoundException) {
+                app.engine.notice("No file manager on this device can open folders directly.")
+            }
+        }
+
+        override fun copyToClipboard(text: String) {
+            val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(ClipData.newPlainText("EzTransfer", text))
+            // Android 13+ shows its own copy confirmation.
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) app.engine.notice("Copied to clipboard")
+        }
+
         override fun startNetworking() {
             lifecycleScope.launch {
                 app.engine.start(networkGate)
@@ -49,6 +87,16 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         setContent {
+            val settings by app.engine.settings.collectAsState()
+            val dark = isDarkTheme(settings.theme)
+            // The in-app theme can differ from the system's, so status and navigation bar icons follow it.
+            DisposableEffect(dark) {
+                enableEdgeToEdge(
+                    statusBarStyle = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT) { dark },
+                    navigationBarStyle = SystemBarStyle.auto(LIGHT_SCRIM, DARK_SCRIM) { dark },
+                )
+                onDispose {}
+            }
             App(app.engine, actions)
         }
         // On recreation the share intent was already handled; handling it again would stage duplicates.
@@ -86,10 +134,13 @@ class MainActivity : ComponentActivity() {
                 IntentCompat.getParcelableArrayListExtra(intent, Intent.EXTRA_STREAM, Uri::class.java).orEmpty()
             else -> return
         }
-        if (uris.isEmpty()) {
-            app.engine.notice("Only files can be shared to EzTransfer.")
+        // Text and links shared from a browser or notes app arrive as EXTRA_TEXT with no stream.
+        val text = intent.getStringExtra(Intent.EXTRA_TEXT)
+        if (uris.isEmpty() && text.isNullOrBlank()) {
+            app.engine.notice("Nothing that EzTransfer can send was shared.")
             return
         }
+        if (!text.isNullOrBlank()) app.engine.setStagedText(text)
         stageUris(uris)
     }
 
@@ -104,6 +155,12 @@ class MainActivity : ComponentActivity() {
             }
             app.engine.stage(handles)
         }
+    }
+
+    private companion object {
+        // The scrim colors enableEdgeToEdge uses by default for three-button navigation.
+        val LIGHT_SCRIM = Color.argb(0xe6, 0xFF, 0xFF, 0xFF)
+        val DARK_SCRIM = Color.argb(0x80, 0x1b, 0x1b, 0x1b)
     }
 
     private fun requestNotificationPermissionIfNeeded() {

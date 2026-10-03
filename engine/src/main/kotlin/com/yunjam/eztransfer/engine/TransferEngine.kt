@@ -1,22 +1,26 @@
 package com.yunjam.eztransfer.engine
 
 import com.yunjam.eztransfer.core.FileSummary
+import com.yunjam.eztransfer.core.HistoryEntry
 import com.yunjam.eztransfer.core.IncomingOffer
 import com.yunjam.eztransfer.core.LocalStatus
 import com.yunjam.eztransfer.core.Peer
 import com.yunjam.eztransfer.core.PeerSource
+import com.yunjam.eztransfer.core.ThemeMode
 import com.yunjam.eztransfer.core.TransferController
 import com.yunjam.eztransfer.core.TransferDirection
 import com.yunjam.eztransfer.core.TransferState
 import com.yunjam.eztransfer.core.TransferStatus
+import com.yunjam.eztransfer.core.TrustedDevice
+import com.yunjam.eztransfer.core.UserSettings
 import com.yunjam.eztransfer.protocol.DEFAULT_PORT
 import com.yunjam.eztransfer.protocol.DeviceInfo
 import com.yunjam.eztransfer.protocol.DeviceType
 import com.yunjam.eztransfer.protocol.FileMeta
+import com.yunjam.eztransfer.protocol.MAX_TEXT_LENGTH
+import com.yunjam.eztransfer.protocol.PROTOCOL_VERSION
 import com.yunjam.eztransfer.protocol.PrepareRequest
 import com.yunjam.eztransfer.protocol.PrepareResponse
-import io.ktor.utils.io.ByteReadChannel
-import io.ktor.utils.io.readAvailable
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -35,6 +39,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
@@ -45,23 +50,34 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.io.File
+import java.io.InputStream
 import java.security.MessageDigest
 import java.security.SecureRandom
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.format.FormatStyle
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 class TransferEngine(
     private val deviceType: DeviceType,
-    private val settings: AppSettings,
+    private val appSettings: AppSettings,
+    private val identity: DeviceIdentity,
     initialDestination: DestinationFolder,
+    historyFile: File? = null,
     private val log: (String) -> Unit = { println("EzTransfer: $it") },
 ) : TransferController {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val client = TransferClient()
-    private val server = TransferServer(ReceiveHandler())
+    private val server = TransferServer(identity.serverSslContext(), ReceiveHandler(), log)
     private val discovery = DiscoveryService(scope, ::selfInfo, ::onPeerSeen, ::replyViaHttp, log)
+    private val trustStore = TrustStore(appSettings.store)
+    private val historyStore = HistoryStore(historyFile)
+    private val historyWriter = Dispatchers.IO.limitedParallelism(1)
     private val startMutex = Mutex()
     private val random = SecureRandom()
 
@@ -72,9 +88,18 @@ class TransferEngine(
     private val scanning = AtomicBoolean(false)
 
     private val _local = MutableStateFlow(
-        LocalStatus(alias = settings.alias, deviceId = settings.deviceId, destinationLabel = initialDestination.label),
+        LocalStatus(
+            alias = appSettings.alias,
+            deviceId = appSettings.deviceId,
+            deviceType = deviceType,
+            fingerprint = formatFingerprint(identity.fingerprint),
+            destinationLabel = initialDestination.label,
+        ),
     )
     override val local: StateFlow<LocalStatus> = _local.asStateFlow()
+
+    private val _settings = MutableStateFlow(readSettings())
+    override val settings: StateFlow<UserSettings> = _settings.asStateFlow()
 
     private val _peers = MutableStateFlow<List<Peer>>(emptyList())
     override val peers: StateFlow<List<Peer>> = _peers.asStateFlow()
@@ -84,11 +109,20 @@ class TransferEngine(
         .map { handles -> handles.map { FileSummary(it.name, it.size) } }
         .stateIn(scope, SharingStarted.Eagerly, emptyList())
 
+    private val _stagedText = MutableStateFlow("")
+    override val stagedText: StateFlow<String> = _stagedText.asStateFlow()
+
     private val _incomingOffer = MutableStateFlow<IncomingOffer?>(null)
     override val incomingOffer: StateFlow<IncomingOffer?> = _incomingOffer.asStateFlow()
 
     private val _transfers = MutableStateFlow<List<TransferState>>(emptyList())
     override val transfers: StateFlow<List<TransferState>> = _transfers.asStateFlow()
+
+    private val _history = MutableStateFlow(historyStore.load())
+    override val history: StateFlow<List<HistoryEntry>> = _history.asStateFlow()
+
+    private val _trustedDevices = MutableStateFlow(trustStore.devices)
+    override val trustedDevices: StateFlow<List<TrustedDevice>> = _trustedDevices.asStateFlow()
 
     // Receive state. A single receive session at a time keeps the accept prompt unambiguous.
     private val receiveLock = Any()
@@ -96,7 +130,7 @@ class TransferEngine(
     private var activeSession: ReceiveSession? = null
 
     /**
-     * Checks local network access, then starts the HTTP server and discovery. Safe to call repeatedly;
+     * Checks local network access, then starts the HTTPS server and discovery. Safe to call repeatedly;
      * a denied permission leaves the engine stopped with [LocalStatus.problem] set so the UI can offer a retry.
      */
     suspend fun start(access: LocalNetworkAccess) {
@@ -110,7 +144,7 @@ class TransferEngine(
         startMutex.withLock {
             if (_local.value.serverRunning) return
             port = try {
-                server.start(DEFAULT_PORT)
+                withContext(Dispatchers.IO) { server.start(DEFAULT_PORT) }
             } catch (e: Exception) {
                 log("Server failed to start: $e")
                 _local.update { it.copy(problem = "Could not start the receiver: ${e.message}") }
@@ -121,12 +155,7 @@ class TransferEngine(
                 "Automatic discovery is unavailable (UDP port $DEFAULT_PORT may be in use). You can still add devices by IP."
             }
             _local.update {
-                it.copy(
-                    serverRunning = true,
-                    port = port,
-                    addresses = currentAddresses(),
-                    problem = discoveryProblem,
-                )
+                it.copy(serverRunning = true, port = port, addresses = currentAddresses(), problem = discoveryProblem)
             }
             tickerJob = scope.launch { ticker() }
             discovery.announce()
@@ -155,13 +184,15 @@ class TransferEngine(
         _local.update { it.copy(destinationLabel = folder.label) }
     }
 
-    fun setAlias(alias: String) {
-        settings.alias = alias
-        _local.update { it.copy(alias = settings.alias) }
-    }
+    /** The folder received files currently go to, for platform "open folder" actions. */
+    val currentDestination: DestinationFolder get() = destination
 
     fun notice(message: String) {
         _local.update { it.copy(notice = message) }
+    }
+
+    fun setNetworkWarning(message: String?) {
+        _local.update { it.copy(networkWarning = message) }
     }
 
     /**
@@ -174,6 +205,54 @@ class TransferEngine(
         val session = synchronized(receiveLock) { activeSession }
         if (session != null) endSession(session, TransferStatus.FAILED, reason, discardPartials = false)
     }
+
+    // ---- Settings ----
+
+    private fun readSettings() = UserSettings(
+        alias = appSettings.alias,
+        autoAcceptTrusted = appSettings.autoAcceptTrusted,
+        theme = appSettings.theme,
+        minimizeToTray = appSettings.minimizeToTray,
+    )
+
+    override fun setAlias(alias: String) {
+        appSettings.alias = alias
+        _settings.value = readSettings()
+        _local.update { it.copy(alias = appSettings.alias) }
+        discovery.announce()
+    }
+
+    override fun setAutoAcceptTrusted(enabled: Boolean) {
+        appSettings.autoAcceptTrusted = enabled
+        _settings.value = readSettings()
+    }
+
+    override fun setTheme(mode: ThemeMode) {
+        appSettings.theme = mode
+        _settings.value = readSettings()
+    }
+
+    override fun setMinimizeToTray(enabled: Boolean) {
+        appSettings.minimizeToTray = enabled
+        _settings.value = readSettings()
+    }
+
+    override fun forgetDevice(deviceId: String) {
+        trustStore.remove(deviceId)
+        onTrustChanged()
+    }
+
+    override fun clearHistory() {
+        _history.value = emptyList()
+        scope.launch(historyWriter) { historyStore.save(emptyList()) }
+    }
+
+    private fun onTrustChanged() {
+        _trustedDevices.value = trustStore.devices
+        _peers.update { peers -> peers.map { withTrust(it) } }
+    }
+
+    // ---- UI actions ----
 
     override fun rescan() {
         discovery.announce()
@@ -195,10 +274,11 @@ class TransferEngine(
         scope.launch {
             try {
                 val info = client.info(target, port)
-                if (info.deviceId == settings.deviceId) {
-                    notice("That address is this device.")
-                } else {
-                    upsertPeer(info, target, PeerSource.MANUAL)
+                when {
+                    info.deviceId == appSettings.deviceId -> notice("That address is this device.")
+                    info.protocolVersion != PROTOCOL_VERSION ->
+                        notice("${info.alias} runs an incompatible version of EzTransfer. Update both devices.")
+                    else -> upsertPeer(info, target, PeerSource.MANUAL)
                 }
             } catch (e: Exception) {
                 notice("Could not reach $target:$port. ${e.friendlyMessage()}")
@@ -212,10 +292,15 @@ class TransferEngine(
 
     override fun clearStaged() {
         stagedHandles.value = emptyList()
+        _stagedText.value = ""
     }
 
-    override fun respondToOffer(accept: Boolean) {
-        synchronized(receiveLock) { pendingOffer }?.decision?.complete(accept)
+    override fun setStagedText(text: String) {
+        _stagedText.value = text.take(MAX_TEXT_LENGTH)
+    }
+
+    override fun respondToOffer(accept: Boolean, trust: Boolean) {
+        synchronized(receiveLock) { pendingOffer }?.decision?.complete(Decision(accept, trust))
     }
 
     override fun cancelTransfer(id: String) {
@@ -236,7 +321,8 @@ class TransferEngine(
 
     override fun sendStaged(peer: Peer) {
         val handles = stagedHandles.value
-        if (handles.isEmpty()) return
+        val text = _stagedText.value.trim().ifEmpty { null }
+        if (handles.isEmpty() && text == null) return
         val transferId = newId()
         addTransfer(
             TransferState(
@@ -245,19 +331,23 @@ class TransferEngine(
                 peerAlias = peer.info.alias,
                 files = handles.map { FileSummary(it.name, it.size) },
                 totalBytes = handles.sumOf { it.size },
+                text = text,
                 status = TransferStatus.CONNECTING,
+                pairingCode = if (peer.trusted) null else pairingCode(identity.fingerprint, peer.info.fingerprint),
             ),
         )
-        val job = scope.launch { runSend(transferId, peer, handles) }
+        val job = scope.launch { runSend(transferId, peer, handles, text) }
         sendJobs[transferId] = job
         job.invokeOnCompletion { sendJobs.remove(transferId) }
     }
 
-    private suspend fun runSend(transferId: String, peer: Peer, handles: List<FileHandle>) {
+    private suspend fun runSend(transferId: String, peer: Peer, handles: List<FileHandle>, text: String?) {
         var host: String? = null
+        val pin = peer.info.fingerprint
         var peerPort = peer.info.port
         var sessionId: String? = null
         try {
+            if (peer.identityChanged) throw PinMismatchException()
             val (reachableHost, info) = firstReachable(peer)
                 ?: throw TransferException("Could not reach ${peer.info.alias}. Check that both devices are on the same network.")
             host = reachableHost
@@ -265,10 +355,13 @@ class TransferEngine(
             updateTransfer(transferId) { it.copy(status = TransferStatus.WAITING_FOR_ACCEPT) }
 
             val metas = handles.mapIndexed { i, h -> FileMeta(id = "f$i", name = h.name, size = h.size) }
-            val response = when (val result = client.prepare(reachableHost, peerPort, PrepareRequest(selfInfo(), metas))) {
+            val request = PrepareRequest(selfInfo(), metas, text)
+            val response = when (val result = client.prepare(reachableHost, peerPort, pin, request)) {
                 is TransferClient.PrepareResult.Accepted -> result.response
                 TransferClient.PrepareResult.Declined -> {
-                    updateTransfer(transferId) { it.copy(status = TransferStatus.DECLINED, message = "Declined by ${info.alias}") }
+                    updateTransfer(transferId) {
+                        it.copy(status = TransferStatus.DECLINED, pairingCode = null, message = "Declined by ${info.alias}")
+                    }
                     return
                 }
                 TransferClient.PrepareResult.Busy ->
@@ -279,51 +372,62 @@ class TransferEngine(
 
             val alreadyThere = metas.sumOf { response.offsets[it.id] ?: 0L }
             val progress = ProgressTracker(transferId, alreadyThere)
-            updateTransfer(transferId) { it.copy(status = TransferStatus.IN_PROGRESS, bytesTransferred = alreadyThere) }
+            updateTransfer(transferId) {
+                it.copy(status = TransferStatus.IN_PROGRESS, bytesTransferred = alreadyThere, pairingCode = null)
+            }
             metas.forEachIndexed { i, meta ->
                 val token = response.tokens[meta.id] ?: throw TransferException("Receiver did not accept ${meta.name}")
                 val offset = response.offsets[meta.id] ?: 0L
                 updateTransfer(transferId) { it.copy(currentFile = meta.name) }
-                client.upload(reachableHost, peerPort, response.sessionId, meta.id, token, handles[i], offset, progress::add)
+                client.upload(reachableHost, peerPort, pin, response.sessionId, meta.id, token, handles[i], offset, progress::add)
             }
             progress.flush()
             updateTransfer(transferId) {
-                it.copy(status = TransferStatus.COMPLETED, bytesTransferred = it.totalBytes, currentFile = null)
+                it.copy(
+                    status = TransferStatus.COMPLETED,
+                    bytesTransferred = it.totalBytes,
+                    currentFile = null,
+                    bytesPerSecond = 0,
+                    message = if (metas.isEmpty()) "Message delivered" else null,
+                )
             }
             stagedHandles.update { current -> current.filterNot { it in handles } }
+            if (text != null && _stagedText.value.trim() == text) _stagedText.value = ""
         } catch (e: InterruptedTransfer) {
             // Not a user cancel: the receiver is left alone so it keeps its partial files for resume.
             updateTransfer(transferId) {
-                it.copy(status = TransferStatus.FAILED, currentFile = null, message = e.message)
+                it.copy(status = TransferStatus.FAILED, currentFile = null, bytesPerSecond = 0, pairingCode = null, message = e.message)
             }
             throw e
         } catch (e: CancellationException) {
             updateTransfer(transferId) {
-                it.copy(status = TransferStatus.CANCELLED, currentFile = null, message = "Cancelled")
+                it.copy(status = TransferStatus.CANCELLED, currentFile = null, bytesPerSecond = 0, pairingCode = null, message = "Cancelled")
             }
             val h = host
             val s = sessionId
             if (h != null && s != null) {
-                withContext(NonCancellable) { runCatching { client.cancel(h, peerPort, s) } }
+                withContext(NonCancellable) { runCatching { client.cancel(h, peerPort, pin, s) } }
             }
             throw e
         } catch (e: Exception) {
             log("Send failed: $e")
             updateTransfer(transferId) {
-                it.copy(status = TransferStatus.FAILED, currentFile = null, message = e.friendlyMessage())
+                it.copy(status = TransferStatus.FAILED, currentFile = null, bytesPerSecond = 0, pairingCode = null, message = e.friendlyMessage())
             }
         }
     }
 
     /**
-     * Tries every known address for [peer] at once and returns the first that answers as the same device.
+     * Tries every known address for [peer] at once and returns the first that presents the pinned key.
      * Racing avoids guessing which interface is reachable when VPNs or multiple adapters are involved.
      */
     private suspend fun firstReachable(peer: Peer): Pair<String, DeviceInfo>? = coroutineScope {
         val result = CompletableDeferred<Pair<String, DeviceInfo>?>()
         val attempts = peer.addresses.map { address ->
             launch {
-                val info = runCatching { client.info(address, peer.info.port) }.getOrNull()
+                val info = runCatching { client.info(address, peer.info.port, pin = peer.info.fingerprint) }
+                    .onFailure { if (it !is CancellationException) log("$address:${peer.info.port} unreachable: $it") }
+                    .getOrNull()
                 if (info != null && info.deviceId == peer.info.deviceId) result.complete(address to info)
             }
         }
@@ -337,34 +441,48 @@ class TransferEngine(
     // ---- Discovery ----
 
     private fun selfInfo() = DeviceInfo(
-        deviceId = settings.deviceId,
-        alias = settings.alias,
+        deviceId = appSettings.deviceId,
+        alias = appSettings.alias,
         deviceType = deviceType,
         port = port,
+        fingerprint = identity.fingerprint,
     )
 
     private fun onPeerSeen(info: DeviceInfo, address: String) {
+        // Older or newer protocol versions cannot complete a transfer, so they are not offered as targets.
+        if (info.protocolVersion != PROTOCOL_VERSION) return
         upsertPeer(info, address, PeerSource.DISCOVERED)
     }
 
     private fun upsertPeer(info: DeviceInfo, address: String, source: PeerSource) {
-        if (info.deviceId == settings.deviceId) return
+        if (info.deviceId == appSettings.deviceId) return
         val now = System.currentTimeMillis()
         _peers.update { peers ->
             val existing = peers.find { it.info.deviceId == info.deviceId }
-            val updated = Peer(
-                info = info,
-                addresses = (listOf(address) + existing?.addresses.orEmpty()).distinct().take(MAX_PEER_ADDRESSES),
-                source = if (existing?.source == PeerSource.MANUAL) PeerSource.MANUAL else source,
-                lastSeenMillis = now,
+            val updated = withTrust(
+                Peer(
+                    info = info,
+                    addresses = (listOf(address) + existing?.addresses.orEmpty()).distinct().take(MAX_PEER_ADDRESSES),
+                    source = if (existing?.source == PeerSource.MANUAL) PeerSource.MANUAL else source,
+                    lastSeenMillis = now,
+                ),
             )
             (peers.filterNot { it.info.deviceId == info.deviceId } + updated).sortedBy { it.info.alias.lowercase() }
         }
     }
 
+    /** Applies the trust store; a trusted id claiming a different key is flagged, never silently re-pinned. */
+    private fun withTrust(peer: Peer): Peer {
+        val trusted = trustStore.find(peer.info.deviceId)
+        return peer.copy(
+            trusted = trusted != null && trusted.fingerprint.equals(peer.info.fingerprint, ignoreCase = true),
+            identityChanged = trusted != null && !trusted.fingerprint.equals(peer.info.fingerprint, ignoreCase = true),
+        )
+    }
+
     private suspend fun replyViaHttp(info: DeviceInfo, address: String): Boolean =
         runCatching {
-            val theirs = client.register(address, info.port, selfInfo())
+            val theirs = client.register(address, info.port, info.fingerprint, selfInfo())
             onPeerSeen(theirs, address)
         }.isSuccess
 
@@ -426,7 +544,9 @@ class TransferEngine(
 
     // ---- Receiving ----
 
-    private class PendingOffer(val decision: CompletableDeferred<Boolean>)
+    private class Decision(val accept: Boolean, val trust: Boolean)
+
+    private class PendingOffer(val decision: CompletableDeferred<Decision>)
 
     private class ReceiveFile(
         val meta: FileMeta,
@@ -457,86 +577,131 @@ class TransferEngine(
         override fun onRegister(peer: DeviceInfo, remoteAddress: String) = onPeerSeen(peer, remoteAddress)
 
         override suspend fun onPrepare(request: PrepareRequest, remoteAddress: String): PrepareOutcome {
-            if (request.files.isEmpty()) return PrepareOutcome.Invalid("No files offered")
+            val text = request.text?.takeIf { it.isNotBlank() }
+            if (request.files.isEmpty() && text == null) return PrepareOutcome.Invalid("Nothing offered")
+            if (text != null && text.length > MAX_TEXT_LENGTH) return PrepareOutcome.Invalid("Message too long")
             if (request.files.any { it.size < 0 }) return PrepareOutcome.Invalid("Negative file size")
             if (request.files.distinctBy { it.id }.size != request.files.size) return PrepareOutcome.Invalid("Duplicate file ids")
-            onPeerSeen(request.sender, remoteAddress)
+            if (request.sender.protocolVersion != PROTOCOL_VERSION) return PrepareOutcome.Invalid("Incompatible version")
 
             val pending = PendingOffer(CompletableDeferred())
             synchronized(receiveLock) {
                 if (pendingOffer != null || activeSession != null) return PrepareOutcome.Busy
                 pendingOffer = pending
             }
-            val files = request.files.map { meta ->
-                val safe = sanitizeFileName(meta.name)
-                ReceiveFile(meta, safe, partialFileName(request.sender.deviceId, safe, meta.size), newToken())
-            }
-            var session: ReceiveSession? = null
             try {
-                _incomingOffer.value = IncomingOffer(
-                    id = newId(),
-                    sender = request.sender,
-                    senderAddress = remoteAddress,
-                    files = files.map { FileSummary(it.safeName, it.meta.size) },
-                )
-                val accepted = withTimeoutOrNull(PROMPT_TIMEOUT_MILLIS) { pending.decision.await() } ?: false
-                _incomingOffer.value = null
-                if (!accepted) return PrepareOutcome.Declined
+                onPeerSeen(request.sender, remoteAddress)
+                val sender = request.sender
+                // Calling back to the sender's own server with its claimed key pinned proves the request came
+                // from the holder of that key; without it anyone on the LAN could claim a trusted device's id.
+                val verified = runCatching { client.info(remoteAddress, sender.port, pin = sender.fingerprint, quick = true) }
+                    .getOrNull()?.deviceId == sender.deviceId
+                val trustedRecord = trustStore.find(sender.deviceId)
+                val identityChanged = trustedRecord != null && !trustedRecord.fingerprint.equals(sender.fingerprint, ignoreCase = true)
+                val trusted = verified && trustedRecord != null && !identityChanged
 
-                // Nothing touches the destination until the user has accepted.
-                val folder = destination
-                val existing = runCatching { folder.existingSizes(files.map { it.partialName }) }
-                    .onFailure { log("Could not inspect destination: $it") }
-                    .getOrDefault(emptyMap())
-                val offsets = files.associate { f ->
-                    f.meta.id to (existing[f.partialName]?.takeIf { it <= f.meta.size } ?: 0L)
+                val files = request.files.map { meta ->
+                    val safe = sanitizeFileName(meta.name)
+                    ReceiveFile(meta, safe, partialFileName(sender.deviceId, safe, meta.size), newToken())
                 }
-                val transferId = newId()
-                val alreadyThere = offsets.values.sum()
-                addTransfer(
-                    TransferState(
-                        id = transferId,
-                        direction = TransferDirection.RECEIVE,
-                        peerAlias = request.sender.alias,
+                val decision = if (trusted && _settings.value.autoAcceptTrusted) {
+                    Decision(accept = true, trust = false)
+                } else {
+                    _incomingOffer.value = IncomingOffer(
+                        id = newId(),
+                        sender = sender,
+                        senderAddress = remoteAddress,
                         files = files.map { FileSummary(it.safeName, it.meta.size) },
-                        totalBytes = files.sumOf { it.meta.size },
-                        bytesTransferred = alreadyThere,
-                        status = TransferStatus.IN_PROGRESS,
-                    ),
-                )
-                session = ReceiveSession(
-                    id = newId(),
-                    transferId = transferId,
-                    senderAddress = remoteAddress,
-                    files = files.associateBy { it.meta.id },
-                    destination = folder,
-                    progress = ProgressTracker(transferId, alreadyThere),
-                )
-                synchronized(receiveLock) { activeSession = session }
-                return PrepareOutcome.Accepted(
-                    PrepareResponse(
-                        sessionId = session.id,
-                        tokens = files.associate { it.meta.id to it.token },
-                        offsets = offsets,
-                    ),
-                )
+                        text = text,
+                        verified = verified,
+                        trusted = trusted,
+                        identityChanged = identityChanged,
+                        pairingCode = pairingCode(identity.fingerprint, sender.fingerprint),
+                    )
+                    withTimeoutOrNull(PROMPT_TIMEOUT_MILLIS) { pending.decision.await() } ?: Decision(false, false)
+                }
+                _incomingOffer.value = null
+                if (!decision.accept) return PrepareOutcome.Declined
+                if (decision.trust && verified) {
+                    trustStore.add(TrustedDevice(sender.deviceId, sender.alias, sender.fingerprint, System.currentTimeMillis()))
+                    onTrustChanged()
+                }
+                return accept(sender, remoteAddress, files, text)
             } finally {
                 _incomingOffer.value = null
                 synchronized(receiveLock) { if (pendingOffer === pending) pendingOffer = null }
             }
         }
 
-        override suspend fun onUpload(
+        private fun accept(sender: DeviceInfo, remoteAddress: String, files: List<ReceiveFile>, text: String?): PrepareOutcome {
+            val transferId = newId()
+            val summaries = files.map { FileSummary(it.safeName, it.meta.size) }
+            if (files.isEmpty()) {
+                addTransfer(
+                    TransferState(
+                        id = transferId,
+                        direction = TransferDirection.RECEIVE,
+                        peerAlias = sender.alias,
+                        files = emptyList(),
+                        totalBytes = 0,
+                        text = text,
+                        status = TransferStatus.COMPLETED,
+                        message = "Message received",
+                    ),
+                )
+                return PrepareOutcome.Accepted(PrepareResponse(newId(), emptyMap(), emptyMap()))
+            }
+
+            // Nothing touches the destination until the user has accepted.
+            val folder = destination
+            val existing = runCatching { folder.existingSizes(files.map { it.partialName }) }
+                .onFailure { log("Could not inspect destination: $it") }
+                .getOrDefault(emptyMap())
+            val offsets = files.associate { f ->
+                f.meta.id to (existing[f.partialName]?.takeIf { it <= f.meta.size } ?: 0L)
+            }
+            val alreadyThere = offsets.values.sum()
+            addTransfer(
+                TransferState(
+                    id = transferId,
+                    direction = TransferDirection.RECEIVE,
+                    peerAlias = sender.alias,
+                    files = summaries,
+                    totalBytes = files.sumOf { it.meta.size },
+                    text = text,
+                    bytesTransferred = alreadyThere,
+                    status = TransferStatus.IN_PROGRESS,
+                ),
+            )
+            val session = ReceiveSession(
+                id = newId(),
+                transferId = transferId,
+                senderAddress = remoteAddress,
+                files = files.associateBy { it.meta.id },
+                destination = folder,
+                progress = ProgressTracker(transferId, alreadyThere),
+            )
+            synchronized(receiveLock) { activeSession = session }
+            return PrepareOutcome.Accepted(
+                PrepareResponse(
+                    sessionId = session.id,
+                    tokens = files.associate { it.meta.id to it.token },
+                    offsets = offsets,
+                ),
+            )
+        }
+
+        override fun onUpload(
             sessionId: String,
             fileId: String,
             token: String,
             offset: Long,
             remoteAddress: String,
-            body: ByteReadChannel,
+            body: InputStream,
         ): UploadOutcome {
             val session = synchronized(receiveLock) { activeSession }?.takeIf { it.id == sessionId }
                 ?: return UploadOutcome.Rejected(404, "The receiver ended this transfer")
-            // Tokens are the only authentication over plain HTTP, so also pin the session to the sender's address.
+            // Defense in depth on top of TLS: tokens are bound to the session, and the session to the sender's address.
             if (session.senderAddress != remoteAddress) return UploadOutcome.Rejected(403, "Wrong sender")
             val file = session.files[fileId] ?: return UploadOutcome.Rejected(404, "Unknown file")
             if (!MessageDigest.isEqual(file.token.toByteArray(), token.toByteArray())) {
@@ -549,27 +714,22 @@ class TransferEngine(
             session.lastActivity = System.currentTimeMillis()
             updateTransfer(session.transferId) { it.copy(currentFile = file.safeName) }
             try {
-                withContext(Dispatchers.IO) {
-                    session.destination.openPartial(file.partialName, offset).use { out ->
-                        val buffer = ByteArray(BUFFER_SIZE)
-                        var remaining = file.meta.size - offset
-                        while (remaining > 0) {
-                            if (session.ended) throw TransferException("Cancelled")
-                            val read = body.readAvailable(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
-                            if (read < 0) throw TransferException("Connection closed with $remaining bytes left")
-                            if (read == 0) continue
-                            out.write(buffer, 0, read)
-                            remaining -= read
-                            session.lastActivity = System.currentTimeMillis()
-                            session.progress.add(read.toLong())
-                        }
+                session.destination.openPartial(file.partialName, offset).use { out ->
+                    val buffer = ByteArray(BUFFER_SIZE)
+                    var remaining = file.meta.size - offset
+                    while (remaining > 0) {
+                        if (session.ended) throw TransferException("Cancelled")
+                        val read = body.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
+                        if (read < 0) throw TransferException("Connection closed with $remaining bytes left")
+                        if (read == 0) continue
+                        out.write(buffer, 0, read)
+                        remaining -= read
+                        session.lastActivity = System.currentTimeMillis()
+                        session.progress.add(read.toLong())
                     }
-                    session.destination.commit(file.partialName, file.safeName)
                 }
+                session.destination.commit(file.partialName, file.safeName)
                 file.done = true
-            } catch (e: CancellationException) {
-                endSession(session, TransferStatus.FAILED, "Connection lost. Send again to resume.", discardPartials = false)
-                throw e
             } catch (e: Exception) {
                 if (session.ended) {
                     // Cancelled mid-upload: endSession skipped the cleanup because this file was still open.
@@ -605,7 +765,7 @@ class TransferEngine(
         }
         updateTransfer(session.transferId) { state ->
             val bytes = if (status == TransferStatus.COMPLETED) state.totalBytes else state.bytesTransferred
-            state.copy(status = status, message = message, currentFile = null, bytesTransferred = bytes)
+            state.copy(status = status, message = message, currentFile = null, bytesTransferred = bytes, bytesPerSecond = 0)
         }
         if (discardPartials) {
             session.discardRequested = true
@@ -624,50 +784,86 @@ class TransferEngine(
 
     // ---- State helpers ----
 
-    /** Coalesces per-buffer progress into at most a few StateFlow updates per second. */
+    /** Coalesces per-buffer progress into a few StateFlow updates per second, with a smoothed speed. */
     private inner class ProgressTracker(private val transferId: String, start: Long) {
         @Volatile private var bytes = start
-        @Volatile private var lastEmitNanos = 0L
+        private var lastEmitNanos = System.nanoTime()
+        private var lastEmitBytes = start
+        private var speed = 0.0
 
         fun add(count: Long) {
             bytes += count
             val now = System.nanoTime()
-            if (now - lastEmitNanos > PROGRESS_INTERVAL_NANOS) {
+            val elapsed = now - lastEmitNanos
+            if (elapsed > PROGRESS_INTERVAL_NANOS) {
+                val instant = (bytes - lastEmitBytes) * 1_000_000_000.0 / elapsed
+                speed = if (speed == 0.0) instant else speed * 0.7 + instant * 0.3
                 lastEmitNanos = now
+                lastEmitBytes = bytes
                 flush()
             }
         }
 
         fun flush() {
             val current = bytes
-            updateTransfer(transferId) { it.copy(bytesTransferred = current) }
+            val rate = speed.toLong()
+            updateTransfer(transferId) { it.copy(bytesTransferred = current, bytesPerSecond = rate) }
         }
     }
 
     private fun addTransfer(state: TransferState) {
         _transfers.update { listOf(state) + it }
+        if (!state.isActive) recordHistory(state)
     }
 
     private fun updateTransfer(id: String, transform: (TransferState) -> TransferState) {
-        _transfers.update { list -> list.map { if (it.id == id) transform(it) else it } }
+        var finished: TransferState? = null
+        _transfers.update { list ->
+            finished = null
+            list.map { old ->
+                if (old.id != id) return@map old
+                transform(old).also { new -> if (old.isActive && !new.isActive) finished = new }
+            }
+        }
+        finished?.let(::recordHistory)
+    }
+
+    private fun recordHistory(state: TransferState) {
+        val now = System.currentTimeMillis()
+        val entry = HistoryEntry(
+            id = state.id,
+            direction = state.direction,
+            peerAlias = state.peerAlias,
+            files = state.files.take(HistoryStore.MAX_FILES_PER_ENTRY),
+            fileCount = state.files.size,
+            totalBytes = state.totalBytes,
+            text = state.text,
+            status = state.status,
+            finishedAtMillis = now,
+            finishedAtLabel = timestampFormatter.format(Instant.ofEpochMilli(now)),
+            location = if (state.direction == TransferDirection.RECEIVE && state.files.isNotEmpty()) destination.label else null,
+            message = state.message,
+        )
+        val updated = _history.updateAndGet { (listOf(entry) + it).take(HistoryStore.MAX_ENTRIES) }
+        scope.launch(historyWriter) { historyStore.save(updated) }
     }
 
     private fun newId(): String = UUID.randomUUID().toString()
 
-    private fun newToken(): String {
-        val bytes = ByteArray(16).also(random::nextBytes)
-        return bytes.joinToString("") { "%02x".format(it) }
-    }
+    private fun newToken(): String = ByteArray(16).also(random::nextBytes).toHex()
 
     private companion object {
         const val TICK_MILLIS = 5_000L
         const val ANNOUNCE_EVERY_TICKS = 6
         const val PEER_EXPIRY_MILLIS = 90_000L
         const val RECEIVE_IDLE_TIMEOUT_MILLIS = 60_000L
-        const val PROGRESS_INTERVAL_NANOS = 150_000_000L
+        const val PROGRESS_INTERVAL_NANOS = 250_000_000L
         const val MAX_PEER_ADDRESSES = 4
         const val MAX_SWEEP_SUBNETS = 3
         const val SWEEP_CONCURRENCY = 48
+
+        val timestampFormatter: DateTimeFormatter =
+            DateTimeFormatter.ofLocalizedDateTime(FormatStyle.MEDIUM, FormatStyle.SHORT).withZone(ZoneId.systemDefault())
     }
 }
 
@@ -675,8 +871,10 @@ private class InterruptedTransfer(reason: String) : CancellationException(reason
 
 internal fun Throwable.friendlyMessage(): String = when (this) {
     is TransferException -> message ?: "Transfer failed"
+    is PinMismatchException -> message!!
     is java.net.ConnectException -> "Connection refused or blocked by a firewall."
     is java.net.SocketTimeoutException -> "Timed out. The device may be unreachable or blocked by a firewall."
     is java.net.UnknownHostException -> "Unknown address."
+    is javax.net.ssl.SSLException -> "Secure connection failed: ${message ?: "handshake error"}"
     else -> message ?: this::class.simpleName ?: "Unknown error"
 }

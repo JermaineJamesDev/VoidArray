@@ -10,6 +10,7 @@ import android.provider.Settings
 import android.util.Log
 import com.yunjam.eztransfer.engine.AppSettings
 import com.yunjam.eztransfer.engine.DestinationFolder
+import com.yunjam.eztransfer.engine.DeviceIdentity
 import com.yunjam.eztransfer.engine.LocalDestinationFolder
 import com.yunjam.eztransfer.engine.TransferEngine
 import com.yunjam.eztransfer.protocol.DeviceType
@@ -32,7 +33,16 @@ class EzTransferApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         settings = AppSettings(SharedPreferencesStore(getSharedPreferences("eztransfer", MODE_PRIVATE)), defaultAlias())
-        engine = TransferEngine(DeviceType.MOBILE, settings, restoreDestination(), log = { Log.d(TAG, it) })
+        // First launch generates a 2048-bit RSA key here, a one-off cost well under the ANR limit.
+        val identity = DeviceIdentity.loadOrCreate(File(filesDir, "identity.p12"), settings.store)
+        engine = TransferEngine(
+            DeviceType.MOBILE,
+            settings,
+            identity,
+            restoreDestination(),
+            historyFile = File(filesDir, "history.json"),
+            log = { Log.d(TAG, it) },
+        )
         wifiLock = (getSystemService(WIFI_SERVICE) as WifiManager)
             .createWifiLock(wifiLockMode(), "EzTransfer:transfer")
             .apply { setReferenceCounted(false) }

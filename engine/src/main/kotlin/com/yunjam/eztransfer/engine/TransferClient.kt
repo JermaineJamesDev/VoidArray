@@ -12,7 +12,9 @@ import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.HttpTimeoutConfig
 import io.ktor.client.plugins.timeout
+import io.ktor.client.request.HttpRequestBuilder
 import io.ktor.client.request.get
+import io.ktor.client.request.header
 import io.ktor.client.request.parameter
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -26,7 +28,22 @@ import io.ktor.utils.io.ByteWriteChannel
 import io.ktor.utils.io.writeFully
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.ConnectionPool
+import okhttp3.Interceptor
+import java.io.IOException
+import java.security.SecureRandom
+import java.security.cert.X509Certificate
+import java.util.concurrent.TimeUnit
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.X509TrustManager
 
+/**
+ * HTTPS client that authenticates peers by pinned public key instead of by certificate chain. Peers are
+ * addressed by LAN IP with self-signed certificates, so chain and hostname validation are meaningless;
+ * every request that carries data instead names the fingerprint it expects, and a network interceptor
+ * checks it against the TLS handshake before any request bytes are written.
+ */
 internal class TransferClient {
     private val http = HttpClient(OkHttp) {
         expectSuccess = false
@@ -34,20 +51,41 @@ internal class TransferClient {
             connectTimeoutMillis = 5_000
             socketTimeoutMillis = 30_000
         }
+        engine {
+            config {
+                sslSocketFactory(acceptAnyContext.socketFactory, AcceptAnyTrustManager)
+                hostnameVerifier { _, _ -> true }
+                // Shorter than the server's 60s keep-alive limit; see HttpsServer.READ_TIMEOUT_MILLIS.
+                connectionPool(ConnectionPool(5, 30, TimeUnit.SECONDS))
+            }
+            addNetworkInterceptor(PinningInterceptor)
+        }
     }
 
-    suspend fun info(host: String, port: Int, quick: Boolean = false): DeviceInfo {
+    /**
+     * Fetches a peer's info. With [pin] the connection must present that key. Without it the call is
+     * trust-on-first-use, but the returned info is still rejected unless its claimed fingerprint matches
+     * the key actually presented, so a peer cannot claim another device's identity.
+     */
+    suspend fun info(host: String, port: Int, pin: String? = null, quick: Boolean = false): DeviceInfo {
         val response = http.get(url(host, port, Routes.INFO)) {
+            pin(pin)
             if (quick) timeout {
                 connectTimeoutMillis = 600
-                requestTimeoutMillis = 1_500
+                requestTimeoutMillis = 2_000
             }
         }
-        return response.decodeOrThrow()
+        val info = response.decodeOrThrow<DeviceInfo>()
+        val presented = response.headers[OBSERVED_HEADER]
+        if (presented == null || !presented.equals(info.fingerprint, ignoreCase = true)) {
+            throw TransferException("The device at $host presented a certificate that does not match its identity.")
+        }
+        return info
     }
 
-    suspend fun register(host: String, port: Int, self: DeviceInfo): DeviceInfo {
+    suspend fun register(host: String, port: Int, pin: String, self: DeviceInfo): DeviceInfo {
         val response = http.post(url(host, port, Routes.REGISTER)) {
+            pin(pin)
             setBody(jsonBody(ProtocolJson.encodeToString(DeviceInfo.serializer(), self)))
             timeout { requestTimeoutMillis = 3_000 }
         }
@@ -55,8 +93,9 @@ internal class TransferClient {
     }
 
     /** Blocks until the receiver's user answers, so the request timeout must outlast the receiver's prompt. */
-    suspend fun prepare(host: String, port: Int, request: PrepareRequest): PrepareResult {
+    suspend fun prepare(host: String, port: Int, pin: String, request: PrepareRequest): PrepareResult {
         val response = http.post(url(host, port, Routes.PREPARE)) {
+            pin(pin)
             setBody(jsonBody(ProtocolJson.encodeToString(PrepareRequest.serializer(), request)))
             timeout {
                 requestTimeoutMillis = PROMPT_TIMEOUT_MILLIS + 15_000
@@ -74,6 +113,7 @@ internal class TransferClient {
     suspend fun upload(
         host: String,
         port: Int,
+        pin: String,
         sessionId: String,
         fileId: String,
         token: String,
@@ -82,6 +122,7 @@ internal class TransferClient {
         onProgress: (Long) -> Unit,
     ) {
         val response = http.post(url(host, port, Routes.UPLOAD)) {
+            pin(pin)
             parameter(Params.SESSION, sessionId)
             parameter(Params.FILE, fileId)
             parameter(Params.TOKEN, token)
@@ -96,14 +137,19 @@ internal class TransferClient {
         }
     }
 
-    suspend fun cancel(host: String, port: Int, sessionId: String) {
+    suspend fun cancel(host: String, port: Int, pin: String, sessionId: String) {
         http.post(url(host, port, Routes.CANCEL)) {
+            pin(pin)
             parameter(Params.SESSION, sessionId)
             timeout { requestTimeoutMillis = 3_000 }
         }
     }
 
     fun close() = http.close()
+
+    private fun HttpRequestBuilder.pin(fingerprint: String?) {
+        if (fingerprint != null) header(PIN_HEADER, fingerprint)
+    }
 
     private class FileContent(
         private val file: FileHandle,
@@ -137,10 +183,45 @@ internal class TransferClient {
         data class Failed(val message: String) : PrepareResult
     }
 
+    private object AcceptAnyTrustManager : X509TrustManager {
+        // Intentionally accepts any chain: authentication is the SPKI pin checked in PinningInterceptor.
+        override fun checkClientTrusted(chain: Array<out X509Certificate>, authType: String) {}
+        override fun checkServerTrusted(chain: Array<out X509Certificate>, authType: String) {}
+        override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+    }
+
+    /**
+     * Runs after the TLS handshake and before the request is written. Requests tagged with [PIN_HEADER]
+     * fail unless the server's key matches; every response is tagged with the key that was presented.
+     */
+    private object PinningInterceptor : Interceptor {
+        override fun intercept(chain: Interceptor.Chain): okhttp3.Response {
+            val expected = chain.request().header(PIN_HEADER)
+            val request = chain.request().newBuilder().removeHeader(PIN_HEADER).build()
+            // Read from the raw TLS session: OkHttp's Handshake.peerCertificates runs the chain through a cleaner
+            // that returns an empty list for certificates not anchored in a trusted root, i.e. all of ours.
+            val session = (chain.connection()?.socket() as? SSLSocket)?.session
+            val certificate = runCatching { session?.peerCertificates?.firstOrNull() }.getOrNull() as? X509Certificate
+            val presented = certificate?.let { spkiFingerprint(it.publicKey) }
+                ?: throw IOException("Peer did not present a certificate")
+            if (expected != null && !expected.equals(presented, ignoreCase = true)) {
+                throw PinMismatchException()
+            }
+            return chain.proceed(request).newBuilder().header(OBSERVED_HEADER, presented).build()
+        }
+    }
+
     private companion object {
+        const val PIN_HEADER = "X-EzTransfer-Expect-Key"
+        const val OBSERVED_HEADER = "X-EzTransfer-Presented-Key"
+
+        val acceptAnyContext: SSLContext = SSLContext.getInstance("TLS").apply {
+            init(null, arrayOf(AcceptAnyTrustManager), SecureRandom())
+        }
+
         fun url(host: String, port: Int, path: String): String {
             val literal = if (':' in host) "[$host]" else host
-            return "http://$literal:$port$path"
+            return "https://$literal:$port$path"
         }
 
         fun jsonBody(json: String) = TextContent(json, ContentType.Application.Json)
@@ -162,6 +243,9 @@ internal class TransferClient {
 }
 
 class TransferException(message: String) : Exception(message)
+
+/** The peer's key differs from the one pinned for it. An IOException so OkHttp surfaces it unchanged. */
+class PinMismatchException : IOException("This device's security key changed. It may be a different device using the same name.")
 
 internal const val BUFFER_SIZE = 64 * 1024
 

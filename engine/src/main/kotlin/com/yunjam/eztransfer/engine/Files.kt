@@ -51,7 +51,7 @@ class LocalFileHandle(private val file: File) : FileHandle {
     }
 }
 
-class LocalDestinationFolder(private val directory: File) : DestinationFolder {
+class LocalDestinationFolder(val directory: File) : DestinationFolder {
     override val label: String = directory.absolutePath
 
     override fun existingSizes(names: Collection<String>): Map<String, Long> =

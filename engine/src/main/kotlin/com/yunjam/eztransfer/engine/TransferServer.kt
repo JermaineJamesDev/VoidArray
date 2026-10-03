@@ -7,35 +7,23 @@ import com.yunjam.eztransfer.protocol.PrepareRequest
 import com.yunjam.eztransfer.protocol.PrepareResponse
 import com.yunjam.eztransfer.protocol.ProtocolJson
 import com.yunjam.eztransfer.protocol.Routes
-import io.ktor.http.ContentType
-import io.ktor.http.HttpStatusCode
-import io.ktor.server.application.ApplicationCall
-import io.ktor.server.cio.CIO
-import io.ktor.server.cio.CIOApplicationEngine
-import io.ktor.server.engine.EmbeddedServer
-import io.ktor.server.engine.embeddedServer
-import io.ktor.server.plugins.origin
-import io.ktor.server.request.receiveChannel
-import io.ktor.server.request.receiveText
-import io.ktor.server.response.respondText
-import io.ktor.server.routing.get
-import io.ktor.server.routing.post
-import io.ktor.server.routing.routing
-import io.ktor.utils.io.ByteReadChannel
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.KSerializer
+import java.io.InputStream
+import javax.net.ssl.SSLContext
 
-/** Callbacks the HTTP layer delegates to; keeps Ktor types out of the engine's transfer logic. */
+/** Callbacks the HTTP layer delegates to; keeps HTTP details out of the engine's transfer logic. */
 internal interface ServerHandler {
     fun info(): DeviceInfo
     fun onRegister(peer: DeviceInfo, remoteAddress: String)
     suspend fun onPrepare(request: PrepareRequest, remoteAddress: String): PrepareOutcome
-    suspend fun onUpload(
+    fun onUpload(
         sessionId: String,
         fileId: String,
         token: String,
         offset: Long,
         remoteAddress: String,
-        body: ByteReadChannel,
+        body: InputStream,
     ): UploadOutcome
     fun onCancel(sessionId: String, remoteAddress: String)
 }
@@ -52,92 +40,85 @@ internal sealed interface UploadOutcome {
     data class Rejected(val status: Int, val message: String) : UploadOutcome
 }
 
-internal class TransferServer(private val handler: ServerHandler) {
-    private var server: EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration>? = null
+internal class TransferServer(
+    sslContext: SSLContext,
+    private val handler: ServerHandler,
+    log: (String) -> Unit,
+) {
+    private val http = HttpsServer(sslContext, ::route, log)
 
     /**
      * Binds [preferredPort] on all interfaces, falling back to an ephemeral port if it is taken.
      * Discovered peers learn the actual port from announcements; only manual entry needs the default.
      */
-    suspend fun start(preferredPort: Int): Int {
-        return runCatching { bind(preferredPort) }.getOrElse { bind(0) }
-    }
+    fun start(preferredPort: Int): Int =
+        runCatching { http.start(preferredPort) }.getOrElse { http.start(0) }
 
-    private suspend fun bind(port: Int): Int {
-        val instance = embeddedServer(CIO, port = port, host = "0.0.0.0") {
-            routing {
-                get(Routes.INFO) {
-                    call.respondJson(DeviceInfo.serializer(), handler.info())
-                }
-                post(Routes.REGISTER) {
-                    val peer = call.receiveJson(DeviceInfo.serializer()) ?: return@post
-                    handler.onRegister(peer, call.request.origin.remoteAddress)
-                    call.respondJson(DeviceInfo.serializer(), handler.info())
-                }
-                post(Routes.PREPARE) {
-                    val request = call.receiveJson(PrepareRequest.serializer()) ?: return@post
-                    when (val outcome = handler.onPrepare(request, call.request.origin.remoteAddress)) {
-                        is PrepareOutcome.Accepted -> call.respondJson(PrepareResponse.serializer(), outcome.response)
-                        PrepareOutcome.Declined -> call.respondError(HttpStatusCode.Forbidden, "Declined")
-                        PrepareOutcome.Busy -> call.respondError(HttpStatusCode.Conflict, "Receiver is busy")
-                        is PrepareOutcome.Invalid -> call.respondError(HttpStatusCode.BadRequest, outcome.message)
-                    }
-                }
-                post(Routes.UPLOAD) {
-                    val params = call.request.queryParameters
-                    val session = params[Params.SESSION]
-                    val file = params[Params.FILE]
-                    val token = params[Params.TOKEN]
-                    val offset = params[Params.OFFSET]?.toLongOrNull()
-                    if (session == null || file == null || token == null || offset == null || offset < 0) {
-                        call.respondError(HttpStatusCode.BadRequest, "Missing or invalid parameters")
-                        return@post
-                    }
-                    val outcome = handler.onUpload(
-                        session, file, token, offset, call.request.origin.remoteAddress, call.receiveChannel(),
-                    )
-                    when (outcome) {
-                        UploadOutcome.Ok -> call.respondText("{}", ContentType.Application.Json)
-                        is UploadOutcome.Rejected ->
-                            call.respondError(HttpStatusCode.fromValue(outcome.status), outcome.message)
-                    }
-                }
-                post(Routes.CANCEL) {
-                    val session = call.request.queryParameters[Params.SESSION]
-                    if (session != null) handler.onCancel(session, call.request.origin.remoteAddress)
-                    call.respondText("{}", ContentType.Application.Json)
-                }
+    fun stop() = http.stop()
+
+    private fun route(request: HttpRequest): HttpResponse = when ("${request.method} ${request.path}") {
+        "GET ${Routes.INFO}" -> json(DeviceInfo.serializer(), handler.info())
+        "POST ${Routes.REGISTER}" -> withJsonBody(request, DeviceInfo.serializer()) { peer ->
+            handler.onRegister(peer, request.remoteAddress)
+            json(DeviceInfo.serializer(), handler.info())
+        }
+        "POST ${Routes.PREPARE}" -> withJsonBody(request, PrepareRequest.serializer()) { body ->
+            // The connection thread is dedicated to this request, so blocking it while the user decides is fine.
+            when (val outcome = runBlocking { handler.onPrepare(body, request.remoteAddress) }) {
+                is PrepareOutcome.Accepted -> json(PrepareResponse.serializer(), outcome.response)
+                PrepareOutcome.Declined -> error(403, "Declined")
+                PrepareOutcome.Busy -> error(409, "Receiver is busy")
+                is PrepareOutcome.Invalid -> error(400, outcome.message)
             }
         }
-        instance.startSuspend(wait = false)
-        server = instance
-        return instance.engine.resolvedConnectors().first().port
+        "POST ${Routes.UPLOAD}" -> upload(request)
+        "POST ${Routes.CANCEL}" -> {
+            request.query[Params.SESSION]?.let { handler.onCancel(it, request.remoteAddress) }
+            HttpResponse(200, EMPTY_JSON)
+        }
+        else -> error(404, "Not found")
     }
 
-    suspend fun stop() {
-        server?.stopSuspend(gracePeriodMillis = 500, timeoutMillis = 2_000)
-        server = null
+    private fun upload(request: HttpRequest): HttpResponse {
+        val session = request.query[Params.SESSION]
+        val file = request.query[Params.FILE]
+        val token = request.query[Params.TOKEN]
+        val offset = request.query[Params.OFFSET]?.toLongOrNull()
+        if (session == null || file == null || token == null || offset == null || offset < 0) {
+            return error(400, "Missing or invalid parameters")
+        }
+        return when (val outcome = handler.onUpload(session, file, token, offset, request.remoteAddress, request.body)) {
+            UploadOutcome.Ok -> HttpResponse(200, EMPTY_JSON)
+            is UploadOutcome.Rejected -> error(outcome.status, outcome.message)
+        }
+    }
+
+    private inline fun <T> withJsonBody(
+        request: HttpRequest,
+        serializer: KSerializer<T>,
+        block: (T) -> HttpResponse,
+    ): HttpResponse {
+        if (request.contentLength > MAX_JSON_BYTES) return error(413, "Request too large")
+        val text = request.body.readBytes().toString(Charsets.UTF_8)
+        val value = try {
+            ProtocolJson.decodeFromString(serializer, text)
+        } catch (e: IllegalArgumentException) {
+            // Also covers SerializationException, which extends it.
+            return error(400, "Malformed request: ${e.message}")
+        }
+        return block(value)
+    }
+
+    private fun <T> json(serializer: KSerializer<T>, value: T) =
+        HttpResponse(200, ProtocolJson.encodeToString(serializer, value).toByteArray())
+
+    private fun error(status: Int, message: String) =
+        HttpResponse(status, ProtocolJson.encodeToString(ErrorResponse.serializer(), ErrorResponse(message)).toByteArray())
+
+    private companion object {
+        val EMPTY_JSON = "{}".toByteArray()
+
+        /** A prepare request for thousands of files is a few hundred KB; anything far beyond that is hostile. */
+        const val MAX_JSON_BYTES = 4L * 1024 * 1024
     }
 }
-
-private suspend fun <T> ApplicationCall.respondJson(serializer: KSerializer<T>, value: T) {
-    respondText(ProtocolJson.encodeToString(serializer, value), ContentType.Application.Json)
-}
-
-private suspend fun ApplicationCall.respondError(status: HttpStatusCode, message: String) {
-    respondText(
-        ProtocolJson.encodeToString(ErrorResponse.serializer(), ErrorResponse(message)),
-        ContentType.Application.Json,
-        status,
-    )
-}
-
-/** Decodes the body or responds 400 and returns null. */
-private suspend fun <T> ApplicationCall.receiveJson(serializer: KSerializer<T>): T? =
-    try {
-        ProtocolJson.decodeFromString(serializer, receiveText())
-    } catch (e: IllegalArgumentException) {
-        // Also covers SerializationException, which extends it.
-        respondError(HttpStatusCode.BadRequest, "Malformed request: ${e.message}")
-        null
-    }

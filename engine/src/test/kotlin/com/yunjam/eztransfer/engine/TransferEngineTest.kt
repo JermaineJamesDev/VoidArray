@@ -26,6 +26,7 @@ class TransferEngineTest {
     private lateinit var sender: TransferEngine
     private lateinit var receiver: TransferEngine
     private lateinit var senderSettings: AppSettings
+    private lateinit var receiverSettings: AppSettings
 
     private class MemoryStore : KeyValueStore {
         private val map = mutableMapOf<String, String>()
@@ -41,8 +42,15 @@ class TransferEngineTest {
         sourceDir = File(root, "source").apply { mkdirs() }
         destDir = File(root, "dest").apply { mkdirs() }
         senderSettings = AppSettings(MemoryStore(), "Sender")
-        sender = TransferEngine(DeviceType.DESKTOP, senderSettings, LocalDestinationFolder(File(root, "unused")), log = {})
-        receiver = TransferEngine(DeviceType.MOBILE, AppSettings(MemoryStore(), "Receiver"), LocalDestinationFolder(destDir), log = {})
+        receiverSettings = AppSettings(MemoryStore(), "Receiver")
+        sender = TransferEngine(
+            DeviceType.DESKTOP, senderSettings, DeviceIdentity.loadOrCreate(File(root, "sender.p12"), senderSettings.store),
+            LocalDestinationFolder(File(root, "unused")), log = { println("sender: $it") },
+        )
+        receiver = TransferEngine(
+            DeviceType.MOBILE, receiverSettings, DeviceIdentity.loadOrCreate(File(root, "receiver.p12"), receiverSettings.store),
+            LocalDestinationFolder(destDir), historyFile = File(root, "history.json"), log = {},
+        )
         sender.start { true }
         receiver.start { true }
     }
@@ -57,22 +65,30 @@ class TransferEngineTest {
     private fun sourceFile(name: String, size: Int): File =
         File(sourceDir, name).apply { writeBytes(Random(name.hashCode()).nextBytes(size)) }
 
-    private suspend fun connectAndSend(files: List<File>, accept: Boolean): TransferStatus {
+    private suspend fun connectAndSend(
+        files: List<File>,
+        accept: Boolean,
+        text: String? = null,
+        trust: Boolean = false,
+    ): TransferStatus {
         sender.addManualPeer("127.0.0.1", receiver.local.value.port!!)
         val peer = withTimeout(10_000) { sender.peers.first { it.isNotEmpty() }.single() }
         sender.stage(files.map(::LocalFileHandle))
+        text?.let(sender::setStagedText)
         withTimeout(5_000) { sender.staged.first { it.size == files.size } }
 
+        val sentBefore = sender.transfers.value.size
         return coroutineScope {
             val responder = launch {
                 receiver.incomingOffer.filterNotNull().first()
-                receiver.respondToOffer(accept)
+                receiver.respondToOffer(accept, trust)
             }
-            sender.sendStaged(peer)
+            sender.sendStaged(sender.peers.value.single())
             val finished = withTimeout(30_000) {
-                sender.transfers.first { list -> list.isNotEmpty() && list.none { it.isActive } }.first()
+                sender.transfers.first { list -> list.size > sentBefore && list.none { it.isActive } }.first()
             }
             responder.cancel()
+            assertTrue(finished.status != TransferStatus.FAILED, "Transfer failed: ${finished.message}")
             finished.status
         }
     }
@@ -111,6 +127,54 @@ class TransferEngineTest {
 
         assertContentEquals(file.readBytes(), File(destDir, file.name).readBytes())
         assertFalse(partial.exists())
+    }
+
+    @Test
+    fun deliversTextOnlyMessage() = runBlocking {
+        assertEquals(TransferStatus.COMPLETED, connectAndSend(emptyList(), accept = true, text = "https://example.com"))
+
+        val received = withTimeout(5_000) { receiver.transfers.first { it.isNotEmpty() } }.single()
+        assertEquals("https://example.com", received.text)
+        assertEquals("https://example.com", receiver.history.value.single().text)
+        assertTrue(File(root, "history.json").let { f -> withTimeout(5_000) { while (!f.isFile) kotlinx.coroutines.delay(20) }; f.readText().contains("example.com") })
+    }
+
+    @Test
+    fun trustedSenderIsAutoAcceptedWithoutPrompt() = runBlocking {
+        val first = sourceFile("one.txt", 100)
+        assertEquals(TransferStatus.COMPLETED, connectAndSend(listOf(first), accept = true, trust = true))
+        assertEquals(senderSettings.deviceId, receiver.trustedDevices.value.single().deviceId)
+
+        receiver.setAutoAcceptTrusted(true)
+        sender.stage(listOf(LocalFileHandle(sourceFile("two.txt", 200))))
+        withTimeout(5_000) { sender.staged.first { it.size == 1 } }
+        val before = sender.transfers.value.size
+        sender.sendStaged(sender.peers.value.single())
+        // No responder: completing proves no prompt was needed.
+        val finished = withTimeout(15_000) {
+            sender.transfers.first { list -> list.size > before && list.none { it.isActive } }.first()
+        }
+        assertEquals(TransferStatus.COMPLETED, finished.status)
+        assertTrue(File(destDir, "two.txt").isFile)
+    }
+
+    @Test
+    fun refusesPeerPresentingADifferentKey() = runBlocking {
+        sender.addManualPeer("127.0.0.1", receiver.local.value.port!!)
+        val real = withTimeout(10_000) { sender.peers.first { it.isNotEmpty() }.single() }
+        // Same device id and address, but a fingerprint the receiver cannot prove it holds.
+        val impostor = real.copy(info = real.info.copy(fingerprint = "0".repeat(64)), addresses = listOf("127.0.0.1"))
+        sender.stage(listOf(LocalFileHandle(sourceFile("secret.txt", 64))))
+        withTimeout(5_000) { sender.staged.first { it.size == 1 } }
+
+        sender.sendStaged(impostor)
+        val finished = withTimeout(15_000) {
+            sender.transfers.first { list -> list.isNotEmpty() && list.none { it.isActive } }.first()
+        }
+
+        assertEquals(TransferStatus.FAILED, finished.status)
+        assertTrue(receiver.incomingOffer.value == null)
+        assertTrue(destDir.listFiles()!!.isEmpty())
     }
 
     @Test
