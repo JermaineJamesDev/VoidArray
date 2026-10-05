@@ -56,6 +56,10 @@ class AppSettings(val store: KeyValueStore, private val defaultAlias: String) {
         get() = store.get(KEY_TRAY) != "false"
         set(value) = store.put(KEY_TRAY, value.toString())
 
+    var discoverable: Boolean
+        get() = store.get(KEY_DISCOVERABLE) != "false"
+        set(value) = store.put(KEY_DISCOVERABLE, value.toString())
+
     private companion object {
         const val KEY_DEVICE_ID = "deviceId"
         const val KEY_ALIAS = "alias"
@@ -63,6 +67,7 @@ class AppSettings(val store: KeyValueStore, private val defaultAlias: String) {
         const val KEY_AUTO_ACCEPT = "autoAcceptTrusted"
         const val KEY_THEME = "theme"
         const val KEY_TRAY = "minimizeToTray"
+        const val KEY_DISCOVERABLE = "discoverable"
     }
 }
 

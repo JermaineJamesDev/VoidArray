@@ -10,7 +10,7 @@ import android.provider.Settings
 import android.util.Log
 import io.github.jermainejamesdev.voidarray.engine.AppSettings
 import io.github.jermainejamesdev.voidarray.engine.DestinationFolder
-import io.github.jermainejamesdev.voidarray.engine.DeviceIdentity
+import io.github.jermainejamesdev.voidarray.engine.FileIdentityStore
 import io.github.jermainejamesdev.voidarray.engine.LocalDestinationFolder
 import io.github.jermainejamesdev.voidarray.engine.TransferEngine
 import io.github.jermainejamesdev.voidarray.protocol.DeviceType
@@ -33,12 +33,16 @@ class VoidArrayApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         settings = AppSettings(SharedPreferencesStore(getSharedPreferences("voidarray", MODE_PRIVATE)), defaultAlias())
-        // First launch generates a 2048-bit RSA key here, a one-off cost well under the ANR limit.
-        val identity = DeviceIdentity.loadOrCreate(File(filesDir, "identity.p12"), settings.store)
+        // First launch generates a 2048-bit RSA key and imports it into the Keystore here, a one-off cost
+        // well under the ANR limit. Older installs' key files are migrated the same way.
+        val identities = KeystoreIdentityStore(
+            FileIdentityStore(File(filesDir, "identity.p12"), settings.store),
+            log = { Log.w(TAG, it) },
+        )
         engine = TransferEngine(
             DeviceType.MOBILE,
             settings,
-            identity,
+            identities,
             restoreDestination(),
             historyFile = File(filesDir, "history.json"),
             log = { Log.d(TAG, it) },

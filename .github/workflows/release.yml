@@ -1,10 +1,5 @@
 name: Release
 
-# Publishing a GitHub release tagged vX.Y.Z builds the signed Android APK and the portable Windows ZIP,
-# then attaches them (with SHA-256 checksums) to that release.
-# Running it manually builds the same files as workflow artifacts without touching any release, which is
-# useful for testing.
-
 on:
   release:
     types: [published]
@@ -14,13 +9,10 @@ on:
         description: Version to build, as X.Y.Z
         required: true
 
-# Build jobs run Gradle and its plugins, so they only get read access. The publish job, which runs no build
-# code, is the only one that can write to the release.
 permissions:
   contents: read
 
 env:
-  # Passed through env rather than interpolated into scripts so tag names cannot inject shell code.
   RAW_VERSION: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.version }}
   RELEASE_TAG: ${{ github.event.release.tag_name }}
 
@@ -75,6 +67,13 @@ jobs:
           "$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)/apksigner" verify --print-certs "dist/VoidArray-$APP_VERSION.apk"
           cd dist && sha256sum "VoidArray-$APP_VERSION.apk" > "VoidArray-$APP_VERSION.apk.sha256"
 
+      - name: Record signing certificate
+        run: |
+          apksigner="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)/apksigner"
+          "$apksigner" verify --print-certs "dist/VoidArray-$APP_VERSION.apk"             | grep -E 'certificate (DN|SHA-256 digest)' > "dist/VoidArray-$APP_VERSION.apk.cert.txt"
+          grep -q 'SHA-256 digest' "dist/VoidArray-$APP_VERSION.apk.cert.txt"
+          cat "dist/VoidArray-$APP_VERSION.apk.cert.txt" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Remove keystore
         if: always()
         run: rm -f "$RUNNER_TEMP/release.jks"
@@ -85,7 +84,7 @@ jobs:
           path: dist/
 
   windows:
-    name: Windows portable ZIP
+    name: Windows installers and portable ZIP
     runs-on: windows-latest
     defaults:
       run:
@@ -109,34 +108,47 @@ jobs:
           fi
           echo "APP_VERSION=$version" >> "$GITHUB_ENV"
 
-      # The non-"Release" packaging tasks skip ProGuard, which would need keep rules for Ktor and serialization.
-      - name: Build portable ZIP
-        run: ./gradlew :desktopApp:packagePortableZip -PappVersion="$APP_VERSION"
+      - name: Build EXE, MSI and portable ZIP
+        run: ./gradlew :desktopApp:packageExe :desktopApp:packageMsi :desktopApp:packagePortableZip -PappVersion="$APP_VERSION"
 
-      - name: Collect ZIP
+      - name: Collect files
         run: |
           mkdir dist
+          cp desktopApp/build/compose/binaries/main/exe/*.exe "dist/VoidArray-$APP_VERSION-setup.exe"
+          cp desktopApp/build/compose/binaries/main/msi/*.msi "dist/VoidArray-$APP_VERSION.msi"
           cp desktopApp/build/compose/binaries/main/portable/*.zip "dist/"
           cd dist
           for file in *; do sha256sum "$file" > "$file.sha256"; done
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: windows-portable
+          name: windows
           path: dist/
 
   publish:
-    name: Attach to release
+    name: Attest and attach to release
     if: github.event_name == 'release'
     needs: [android, windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: dist
           merge-multiple: true
+
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.apk
+            dist/*.exe
+            dist/*.msi
+            dist/*.zip
 
       - name: Upload files
         env:

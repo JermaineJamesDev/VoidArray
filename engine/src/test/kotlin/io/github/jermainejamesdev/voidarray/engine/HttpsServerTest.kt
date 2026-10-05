@@ -37,7 +37,7 @@ class HttpsServerTest {
     @BeforeTest
     fun setUp() {
         dir = Files.createTempDirectory("voidarray-http").toFile()
-        val identity = DeviceIdentity.loadOrCreate(File(dir, "id.p12"), MemoryStore())
+        val identity = FileIdentityStore(File(dir, "id.p12"), MemoryStore()).load()
         server = HttpsServer(identity.sslContext(), { request ->
             val body = request.body.readBytes().toString(Charsets.UTF_8)
             val text = "${request.method} ${request.path} ${request.query} $body key=${request.peerFingerprint}"
@@ -110,7 +110,7 @@ class HttpsServerTest {
 
     @Test
     fun reportsClientCertificateKeyIncludingOnResumedSessions() {
-        val caller = DeviceIdentity.loadOrCreate(File(dir, "caller.p12"), MemoryStore())
+        val caller = FileIdentityStore(File(dir, "caller.p12"), MemoryStore()).load()
         val context = caller.sslContext()
         val request = "GET /who HTTP/1.1\r\nConnection: close\r\n\r\n"
         // The second connection from the same context resumes the TLS session; the key must survive that.

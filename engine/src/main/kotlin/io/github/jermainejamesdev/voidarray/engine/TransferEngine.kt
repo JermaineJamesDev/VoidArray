@@ -4,8 +4,11 @@ import io.github.jermainejamesdev.voidarray.core.FileSummary
 import io.github.jermainejamesdev.voidarray.core.HistoryEntry
 import io.github.jermainejamesdev.voidarray.core.IncomingOffer
 import io.github.jermainejamesdev.voidarray.core.LocalStatus
+import io.github.jermainejamesdev.voidarray.core.PairingInvite
+import io.github.jermainejamesdev.voidarray.core.PairingRequest
 import io.github.jermainejamesdev.voidarray.core.Peer
 import io.github.jermainejamesdev.voidarray.core.PeerSource
+import io.github.jermainejamesdev.voidarray.core.QrPairingState
 import io.github.jermainejamesdev.voidarray.core.ThemeMode
 import io.github.jermainejamesdev.voidarray.core.TransferController
 import io.github.jermainejamesdev.voidarray.core.TransferDirection
@@ -13,6 +16,7 @@ import io.github.jermainejamesdev.voidarray.core.TransferState
 import io.github.jermainejamesdev.voidarray.core.TransferStatus
 import io.github.jermainejamesdev.voidarray.core.TrustedDevice
 import io.github.jermainejamesdev.voidarray.core.UserSettings
+import io.github.jermainejamesdev.voidarray.core.looksExecutable
 import io.github.jermainejamesdev.voidarray.protocol.DEFAULT_PORT
 import io.github.jermainejamesdev.voidarray.protocol.DeviceInfo
 import io.github.jermainejamesdev.voidarray.protocol.DeviceType
@@ -23,6 +27,7 @@ import io.github.jermainejamesdev.voidarray.protocol.PairRequest
 import io.github.jermainejamesdev.voidarray.protocol.PairResponse
 import io.github.jermainejamesdev.voidarray.protocol.PrepareRequest
 import io.github.jermainejamesdev.voidarray.protocol.PrepareResponse
+import io.github.jermainejamesdev.voidarray.protocol.QrPairRequest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -67,17 +72,21 @@ import java.util.concurrent.atomic.AtomicBoolean
 class TransferEngine(
     private val deviceType: DeviceType,
     private val appSettings: AppSettings,
-    private val identity: DeviceIdentity,
+    private val identityStore: IdentityStore,
     initialDestination: DestinationFolder,
     historyFile: File? = null,
     private val log: (String) -> Unit = { println("VoidArray: $it") },
 ) : TransferController {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val sslContext = identity.sslContext()
-    private val client = TransferClient(sslContext)
-    private val server = TransferServer(sslContext, ReceiveHandler(), log)
-    private val discovery = DiscoveryService(scope, ::selfInfo, ::onAnnouncement, log)
+    private val handler = ReceiveHandler()
+
+    // Replaced together, under startMutex, when the user resets this device's key.
+    @Volatile private var identity: DeviceIdentity = identityStore.load()
+    @Volatile private var client = TransferClient(identity.sslContext())
+    @Volatile private var server = TransferServer(identity.sslContext(), handler, log)
+
+    private val discovery = DiscoveryService(scope, ::selfInfo, ::onAnnouncement, { appSettings.discoverable }, log)
     private val trustStore = TrustStore(appSettings.store)
     private val historyStore = HistoryStore(historyFile)
     private val historyWriter = Dispatchers.IO.limitedParallelism(1)
@@ -126,6 +135,18 @@ class TransferEngine(
 
     private val _trustedDevices = MutableStateFlow(trustStore.devices)
     override val trustedDevices: StateFlow<List<TrustedDevice>> = _trustedDevices.asStateFlow()
+
+    private val _pairingInvite = MutableStateFlow<PairingInvite?>(null)
+    override val pairingInvite: StateFlow<PairingInvite?> = _pairingInvite.asStateFlow()
+
+    private val _qrPairing = MutableStateFlow<QrPairingState?>(null)
+    override val qrPairing: StateFlow<QrPairingState?> = _qrPairing.asStateFlow()
+
+    // QR pairing. At most one code is open at a time, and each one is consumed by the first valid scan.
+    private val inviteLock = Any()
+    private var invite: Invite? = null
+    private var inviteExpiryJob: Job? = null
+    private var qrPairingJob: Job? = null
 
     // Receive state. A single receive session at a time keeps the accept prompt unambiguous.
     private val receiveLock = Any()
@@ -218,6 +239,7 @@ class TransferEngine(
         autoAcceptTrusted = appSettings.autoAcceptTrusted,
         theme = appSettings.theme,
         minimizeToTray = appSettings.minimizeToTray,
+        discoverable = appSettings.discoverable,
     )
 
     override fun setAlias(alias: String) {
@@ -240,6 +262,53 @@ class TransferEngine(
     override fun setMinimizeToTray(enabled: Boolean) {
         appSettings.minimizeToTray = enabled
         _settings.value = readSettings()
+    }
+
+    override fun setDiscoverable(enabled: Boolean) {
+        appSettings.discoverable = enabled
+        _settings.value = readSettings()
+        if (enabled) discovery.announce()
+    }
+
+    override fun resetIdentity() {
+        val busy = _transfers.value.any { it.isActive } || synchronized(receiveLock) { pendingOffer != null || activeSession != null }
+        if (busy) {
+            notice("Finish or cancel the current transfer before resetting this device's key.")
+            return
+        }
+        scope.launch {
+            startMutex.withLock {
+                val fresh = try {
+                    identityStore.replace()
+                } catch (e: Exception) {
+                    log("Identity reset failed: $e")
+                    notice("Could not create a new key: ${e.message}")
+                    return@withLock
+                }
+                closePairingQr()
+                pendingPairings.clear()
+                val running = _local.value.serverRunning
+                // Both TLS contexts are rebuilt rather than patched: cached sessions and session tickets
+                // from the old key must not let a peer resume a connection that skips the new certificate.
+                server.stop()
+                client.close()
+                identity = fresh
+                client = TransferClient(fresh.sslContext())
+                server = TransferServer(fresh.sslContext(), handler, log)
+                if (running) {
+                    port = try {
+                        withContext(Dispatchers.IO) { server.start(port) }
+                    } catch (e: Exception) {
+                        log("Server failed to restart: $e")
+                        _local.update { it.copy(serverRunning = false, problem = "Could not restart the receiver: ${e.message}") }
+                        return@withLock
+                    }
+                }
+                _local.update { it.copy(fingerprint = formatFingerprint(fresh.fingerprint), port = if (running) port else it.port) }
+                discovery.announce()
+                notice("This device has a new key. Pair again with devices that trusted the old one.")
+            }
+        }
     }
 
     override fun forgetDevice(deviceId: String) {
@@ -289,6 +358,109 @@ class TransferEngine(
                 notice("Could not reach $target:$port. ${e.friendlyMessage()}")
             }
         }
+    }
+
+    // ---- QR pairing ----
+
+    override fun showPairingQr() {
+        val local = _local.value
+        val listenPort = local.port
+        if (!local.serverRunning || listenPort == null) {
+            notice("VoidArray is not receiving yet, so other devices cannot pair with it.")
+            return
+        }
+        val addresses = currentAddresses().take(MAX_QR_ADDRESSES)
+        if (addresses.isEmpty()) {
+            notice("Connect to a Wi-Fi or Ethernet network first.")
+            return
+        }
+        val token = newToken()
+        val expiresAt = System.currentTimeMillis() + QR_INVITE_TTL_MILLIS
+        val uri = PairingLink(identity.fingerprint, listenPort, addresses, token).toUri()
+        val created = Invite(token, expiresAt)
+        synchronized(inviteLock) {
+            invite?.decision?.complete(false)
+            invite = created
+            inviteExpiryJob?.cancel()
+            inviteExpiryJob = scope.launch {
+                delay(QR_INVITE_TTL_MILLIS)
+                // A code someone has already scanned stays open until its user answers the prompt.
+                if (expireInvite(created)) notice("The pairing code expired. Show a new one to pair.")
+            }
+        }
+        _pairingInvite.value = PairingInvite(uri, encodeQr(uri), expiresAt)
+    }
+
+    override fun closePairingQr() {
+        synchronized(inviteLock) {
+            invite?.decision?.complete(false)
+            invite = null
+            inviteExpiryJob?.cancel()
+            inviteExpiryJob = null
+        }
+        _pairingInvite.value = null
+    }
+
+    /** Closes [expired] if it is still the open code and nobody has scanned it. */
+    private fun expireInvite(expired: Invite): Boolean {
+        synchronized(inviteLock) {
+            if (invite !== expired || expired.claimed) return false
+            invite = null
+        }
+        _pairingInvite.value = null
+        return true
+    }
+
+    override fun respondToPairingRequest(accept: Boolean) {
+        synchronized(inviteLock) { invite }?.decision?.complete(accept)
+    }
+
+    override fun pairWithQr(text: String) {
+        val link = PairingLink.parse(text)
+        if (link == null) {
+            _qrPairing.value = QrPairingState.Failed("That QR code is not a VoidArray pairing code.")
+            return
+        }
+        if (link.fingerprint.equals(identity.fingerprint, ignoreCase = true)) {
+            _qrPairing.value = QrPairingState.Failed("That is this device's own pairing code. Scan the code on the other device.")
+            return
+        }
+        qrPairingJob?.cancel()
+        _qrPairing.value = QrPairingState.Connecting
+        qrPairingJob = scope.launch {
+            try {
+                val (host, info) = firstReachable(link.addresses, link.port, link.fingerprint)
+                    ?: throw TransferException("Could not reach the other device. Check that both devices are on the same network.")
+                if (info.protocolVersion != PROTOCOL_VERSION) {
+                    throw TransferException("${sanitizeAlias(info.alias)} runs an incompatible version of VoidArray. Update both devices.")
+                }
+                val alias = sanitizeAlias(info.alias)
+                _qrPairing.value = QrPairingState.WaitingForConfirmation(alias)
+                when (val result = client.pairByQr(host, info.port, link.fingerprint, QrPairRequest(selfInfo(), link.token))) {
+                    is TransferClient.QrPairResult.Paired -> {
+                        // The key comes from the scanned code, never from the network, which is what makes this pairing safe.
+                        if (result.info.deviceId != info.deviceId) throw TransferException("The other device changed while pairing. Try again.")
+                        trustStore.add(TrustedDevice(info.deviceId, alias, link.fingerprint, System.currentTimeMillis()))
+                        onTrustChanged()
+                        upsertPeer(result.info, host, PeerSource.MANUAL)
+                        _qrPairing.value = QrPairingState.Paired(alias)
+                    }
+                    TransferClient.QrPairResult.Declined -> _qrPairing.value = QrPairingState.Failed("$alias declined the pairing.")
+                    is TransferClient.QrPairResult.Failed -> _qrPairing.value = QrPairingState.Failed(result.message)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log("QR pairing failed: $e")
+                _qrPairing.value = QrPairingState.Failed(e.friendlyMessage())
+            }
+        }
+    }
+
+    override fun dismissQrPairing() {
+        qrPairingJob?.cancel()
+        qrPairingJob = null
+        _qrPairing.value = null
     }
 
     override fun removeStaged(index: Int) {
@@ -352,7 +524,7 @@ class TransferEngine(
         var sessionId: String? = null
         try {
             if (peer.identityChanged) throw PinMismatchException()
-            val (reachableHost, info) = firstReachable(peer)
+            val (reachableHost, info) = firstReachable(peer.addresses, peer.info.port, pin, peer.info.deviceId)
                 ?: throw TransferException("Could not reach ${peer.info.alias}. Check that both devices are on the same network.")
             host = reachableHost
             peerPort = info.port
@@ -431,17 +603,23 @@ class TransferEngine(
     }
 
     /**
-     * Tries every known address for [peer] at once and returns the first that presents the pinned key.
-     * Racing avoids guessing which interface is reachable when VPNs or multiple adapters are involved.
+     * Tries every address at once and returns the first that presents the pinned key (and, when given,
+     * claims [deviceId]). Racing avoids guessing which interface is reachable when VPNs or multiple
+     * adapters are involved.
      */
-    private suspend fun firstReachable(peer: Peer): Pair<String, DeviceInfo>? = coroutineScope {
+    private suspend fun firstReachable(
+        addresses: List<String>,
+        port: Int,
+        pin: String,
+        deviceId: String? = null,
+    ): Pair<String, DeviceInfo>? = coroutineScope {
         val result = CompletableDeferred<Pair<String, DeviceInfo>?>()
-        val attempts = peer.addresses.map { address ->
+        val attempts = addresses.map { address ->
             launch {
-                val info = runCatching { client.info(address, peer.info.port, pin = peer.info.fingerprint) }
-                    .onFailure { if (it !is CancellationException) log("$address:${peer.info.port} unreachable: $it") }
+                val info = runCatching { client.info(address, port, pin = pin) }
+                    .onFailure { if (it !is CancellationException) log("$address:$port unreachable: $it") }
                     .getOrNull()
-                if (info != null && info.deviceId == peer.info.deviceId) result.complete(address to info)
+                if (info != null && (deviceId == null || info.deviceId == deviceId)) result.complete(address to info)
             }
         }
         launch {
@@ -516,7 +694,8 @@ class TransferEngine(
         // Other protocol versions are never listed, so connecting to them would be wasted effort.
         if (info.protocolVersion != PROTOCOL_VERSION) return true
         return runCatching {
-            val confirmed = if (replyRequested) {
+            // Registering tells the announcer about this device, which a hidden device must not do.
+            val confirmed = if (replyRequested && appSettings.discoverable) {
                 client.register(address, info.port, info.fingerprint, selfInfo())
             } else {
                 client.info(address, info.port, pin = info.fingerprint, quick = true)
@@ -587,6 +766,12 @@ class TransferEngine(
 
     private class PendingOffer(val decision: CompletableDeferred<Decision>)
 
+    /** An open pairing QR code. [claimed] is set by the first caller with the right token; later ones are refused. */
+    private class Invite(val token: String, val expiresAtMillis: Long) {
+        var claimed = false
+        val decision = CompletableDeferred<Boolean>()
+    }
+
     /** A pairing exchange awaiting its offer: the caller's key, its commitment, and the nonce we answered with. */
     private class PendingPairing(
         val fingerprint: String,
@@ -640,6 +825,40 @@ class TransferEngine(
             return PairOutcome.Started(PairResponse(id, nonce))
         }
 
+        override suspend fun onQrPair(request: QrPairRequest, caller: Caller): QrPairOutcome {
+            if (request.sender.protocolVersion != PROTOCOL_VERSION) return QrPairOutcome.Invalid("Incompatible version")
+            if (!request.sender.fingerprint.equals(caller.fingerprint, ignoreCase = true)) {
+                return QrPairOutcome.Forbidden("This request was not sent by the device it names.")
+            }
+            val now = System.currentTimeMillis()
+            if (!pairingAttempts.tryAcquire(caller.fingerprint, now)) return QrPairOutcome.RateLimited
+            val claimed = synchronized(inviteLock) {
+                invite?.takeIf {
+                    !it.claimed && now < it.expiresAtMillis &&
+                        MessageDigest.isEqual(it.token.toByteArray(), request.token.toByteArray())
+                }?.also { it.claimed = true }
+            } ?: return QrPairOutcome.Invalid("This pairing code has expired or was already used. Show a new one and scan again.")
+
+            val sender = request.sender.copy(alias = sanitizeAlias(request.sender.alias), fingerprint = caller.fingerprint)
+            _pairingInvite.update { it?.copy(request = PairingRequest(sender.alias, sender.deviceType, sender.fingerprint)) }
+            val accepted = withTimeoutOrNull(PROMPT_TIMEOUT_MILLIS) { claimed.decision.await() } ?: false
+            synchronized(inviteLock) {
+                if (invite === claimed) {
+                    invite = null
+                    inviteExpiryJob?.cancel()
+                    inviteExpiryJob = null
+                    _pairingInvite.value = null
+                }
+            }
+            if (!accepted) return QrPairOutcome.Declined
+            // Scanning the code proves the caller saw this screen; the key is the one it just presented.
+            trustStore.add(TrustedDevice(sender.deviceId, sender.alias, caller.fingerprint, System.currentTimeMillis()))
+            onTrustChanged()
+            onPeerSeen(sender, caller.address)
+            notice("Paired with ${sender.alias}")
+            return QrPairOutcome.Paired(selfInfo())
+        }
+
         override suspend fun onPrepare(request: PrepareRequest, caller: Caller): PrepareOutcome {
             val text = request.text?.takeIf { it.isNotBlank() }
             if (request.files.isEmpty() && text == null) return PrepareOutcome.Invalid("Nothing offered")
@@ -680,7 +899,9 @@ class TransferEngine(
                     val safe = sanitizeFileName(meta.name)
                     ReceiveFile(meta, safe, partialFileName(sender.fingerprint, safe, meta.size), newToken())
                 }
-                val decision = if (trusted && _settings.value.autoAcceptTrusted) {
+                // A trusted device can still be compromised, so programs always need a person to accept them.
+                val hasPrograms = files.any { looksExecutable(it.safeName) }
+                val decision = if (trusted && _settings.value.autoAcceptTrusted && !hasPrograms) {
                     Decision(accept = true, trust = false)
                 } else {
                     _incomingOffer.value = IncomingOffer(
@@ -945,6 +1166,11 @@ class TransferEngine(
         const val PAIRING_TTL_MILLIS = 30_000L
         const val MAX_PENDING_PAIRINGS = 16
         val SHA256_HEX = Regex("[0-9a-fA-F]{64}")
+
+        // Short enough that a photo of the code is soon useless, long enough to walk over with a phone.
+        const val QR_INVITE_TTL_MILLIS = 5 * 60_000L
+        // Each address lengthens the code; beyond a few it gets too dense to scan off a laptop screen.
+        const val MAX_QR_ADDRESSES = 4
 
         val timestampFormatter: DateTimeFormatter =
             DateTimeFormatter.ofLocalizedDateTime(FormatStyle.MEDIUM, FormatStyle.SHORT).withZone(ZoneId.systemDefault())

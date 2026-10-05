@@ -6,9 +6,13 @@ import io.github.jermainejamesdev.voidarray.core.FileSummary
 import io.github.jermainejamesdev.voidarray.core.HistoryEntry
 import io.github.jermainejamesdev.voidarray.core.IncomingOffer
 import io.github.jermainejamesdev.voidarray.core.LocalStatus
+import io.github.jermainejamesdev.voidarray.core.PairingInvite
+import io.github.jermainejamesdev.voidarray.core.PairingRequest
 import io.github.jermainejamesdev.voidarray.core.Peer
 import io.github.jermainejamesdev.voidarray.core.PeerSource
 import io.github.jermainejamesdev.voidarray.core.PlatformActions
+import io.github.jermainejamesdev.voidarray.core.QrMatrix
+import io.github.jermainejamesdev.voidarray.core.QrPairingState
 import io.github.jermainejamesdev.voidarray.core.ThemeMode
 import io.github.jermainejamesdev.voidarray.core.TransferController
 import io.github.jermainejamesdev.voidarray.core.TransferDirection
@@ -66,9 +70,35 @@ class ScreenshotRenderer {
         renderTo(File(out, "offer-light-phone.png"), 412, 900) {
             AppRoot(lightOffer, SampleActions, isDropTarget = false, startDestination = Destination.RECEIVE)
         }
+        val qr = SampleController(ThemeMode.DARK, invite = sampleInvite())
+        renderTo(File(out, "pair-qr-dark.png"), 1280, 860) {
+            AppRoot(qr, SampleActions, isDropTarget = false, startDestination = Destination.RECEIVE)
+        }
+        renderTo(File(out, "pair-qr-dark-phone.png"), 412, 900) {
+            AppRoot(qr, SampleActions, isDropTarget = false, startDestination = Destination.RECEIVE)
+        }
+        val approve = SampleController(
+            ThemeMode.DARK,
+            invite = sampleInvite().copy(request = PairingRequest("Lin's Pixel", DeviceType.MOBILE, "A".repeat(64))),
+        )
+        renderTo(File(out, "pair-approve-dark-phone.png"), 412, 900) {
+            AppRoot(approve, SampleActions, isDropTarget = false, startDestination = Destination.RECEIVE)
+        }
+        val scanned = SampleController(ThemeMode.LIGHT, qrPairing = QrPairingState.WaitingForConfirmation("Jade Pavilion PC"))
+        renderTo(File(out, "pair-waiting-light-phone.png"), 412, 900) {
+            AppRoot(scanned, SampleActions, isDropTarget = false, startDestination = Destination.SEND)
+        }
     }
 
     private val laptop = DeviceInfo("l1", "Study Laptop", DeviceType.DESKTOP, 53318, fingerprint = "B".repeat(64))
+
+    /** A random pattern of the right size; the renderer only needs something QR-shaped to lay out. */
+    private fun sampleInvite(): PairingInvite {
+        val size = 41
+        val random = java.util.Random(7)
+        val modules = BooleanArray(size * size) { random.nextBoolean() }
+        return PairingInvite("voidarray://pair?v=1", QrMatrix(size, modules), expiresAtMillis = System.currentTimeMillis() + 272_000)
+    }
 
     private val newDeviceOffer = IncomingOffer(
         id = "o1",
@@ -112,15 +142,22 @@ class ScreenshotRenderer {
         override val appVersion = "1.0.0"
         override val supportsTray = true
         override val supportsDragAndDrop = true
+        override val supportsQrScanning = true
         override val reduceMotion = false
         override fun pickFilesToSend() {}
+        override fun scanPairingQr() {}
         override fun pickDestinationFolder() {}
         override fun openReceivedFolder() {}
         override fun copyToClipboard(text: String) {}
         override fun startNetworking() {}
     }
 
-    private class SampleController(theme: ThemeMode, offer: IncomingOffer? = null) : TransferController {
+    private class SampleController(
+        theme: ThemeMode,
+        offer: IncomingOffer? = null,
+        invite: PairingInvite? = null,
+        qrPairing: QrPairingState? = null,
+    ) : TransferController {
         private val phone = DeviceInfo("p1", "Lin's Pixel", DeviceType.MOBILE, 53318, fingerprint = "A".repeat(64))
         private val laptop = DeviceInfo("l1", "Study Laptop", DeviceType.DESKTOP, 53318, fingerprint = "B".repeat(64))
 
@@ -193,6 +230,8 @@ class ScreenshotRenderer {
             ),
         )
         override val trustedDevices = MutableStateFlow(listOf(TrustedDevice("p1", "Lin's Pixel", "A".repeat(64), 0)))
+        override val pairingInvite = MutableStateFlow(invite)
+        override val qrPairing = MutableStateFlow(qrPairing)
 
         override fun rescan() {}
         override fun addManualPeer(host: String, port: Int) {}
@@ -210,5 +249,12 @@ class ScreenshotRenderer {
         override fun setMinimizeToTray(enabled: Boolean) {}
         override fun forgetDevice(deviceId: String) {}
         override fun clearHistory() {}
+        override fun showPairingQr() {}
+        override fun closePairingQr() {}
+        override fun respondToPairingRequest(accept: Boolean) {}
+        override fun pairWithQr(text: String) {}
+        override fun dismissQrPairing() {}
+        override fun setDiscoverable(enabled: Boolean) {}
+        override fun resetIdentity() {}
     }
 }

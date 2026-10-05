@@ -8,6 +8,7 @@ import io.github.jermainejamesdev.voidarray.protocol.Params
 import io.github.jermainejamesdev.voidarray.protocol.PrepareRequest
 import io.github.jermainejamesdev.voidarray.protocol.PrepareResponse
 import io.github.jermainejamesdev.voidarray.protocol.ProtocolJson
+import io.github.jermainejamesdev.voidarray.protocol.QrPairRequest
 import io.github.jermainejamesdev.voidarray.protocol.Routes
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.KSerializer
@@ -25,6 +26,7 @@ internal interface ServerHandler {
     fun info(): DeviceInfo
     fun onRegister(peer: DeviceInfo, caller: Caller)
     fun onPair(request: PairRequest, caller: Caller): PairOutcome
+    suspend fun onQrPair(request: QrPairRequest, caller: Caller): QrPairOutcome
     suspend fun onPrepare(request: PrepareRequest, caller: Caller): PrepareOutcome
     fun onUpload(
         sessionId: String,
@@ -41,6 +43,14 @@ internal sealed interface PairOutcome {
     data class Started(val response: PairResponse) : PairOutcome
     data object RateLimited : PairOutcome
     data class Invalid(val message: String) : PairOutcome
+}
+
+internal sealed interface QrPairOutcome {
+    data class Paired(val self: DeviceInfo) : QrPairOutcome
+    data object Declined : QrPairOutcome
+    data object RateLimited : QrPairOutcome
+    data class Invalid(val message: String) : QrPairOutcome
+    data class Forbidden(val message: String) : QrPairOutcome
 }
 
 internal sealed interface PrepareOutcome {
@@ -88,6 +98,16 @@ internal class TransferServer(
                     is PairOutcome.Started -> json(PairResponse.serializer(), outcome.response)
                     PairOutcome.RateLimited -> error(429, "Too many pairing attempts. Wait a minute and try again.")
                     is PairOutcome.Invalid -> error(400, outcome.message)
+                }
+            }
+            "POST ${Routes.QR_PAIR}" -> withJsonBody(request, QrPairRequest.serializer()) { body ->
+                // Waits for the user to confirm, like a prepare request.
+                when (val outcome = runBlocking { handler.onQrPair(body, caller) }) {
+                    is QrPairOutcome.Paired -> json(DeviceInfo.serializer(), outcome.self)
+                    QrPairOutcome.Declined -> error(403, "Declined")
+                    QrPairOutcome.RateLimited -> error(429, "Too many pairing attempts. Wait a minute and try again.")
+                    is QrPairOutcome.Invalid -> error(400, outcome.message)
+                    is QrPairOutcome.Forbidden -> error(401, outcome.message)
                 }
             }
             "POST ${Routes.PREPARE}" -> withJsonBody(request, PrepareRequest.serializer()) { body ->

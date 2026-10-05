@@ -30,7 +30,7 @@ import androidx.compose.ui.window.rememberWindowState
 import io.github.jermainejamesdev.voidarray.core.PlatformActions
 import io.github.jermainejamesdev.voidarray.core.TransferDirection
 import io.github.jermainejamesdev.voidarray.engine.AppSettings
-import io.github.jermainejamesdev.voidarray.engine.DeviceIdentity
+import io.github.jermainejamesdev.voidarray.engine.FileIdentityStore
 import io.github.jermainejamesdev.voidarray.engine.LocalDestinationFolder
 import io.github.jermainejamesdev.voidarray.engine.LocalFileHandle
 import io.github.jermainejamesdev.voidarray.engine.PropertiesFileStore
@@ -59,12 +59,12 @@ fun main() {
     val dataDir = appDataDir()
     val store = PropertiesFileStore(File(dataDir, "settings.properties"))
     val settings = AppSettings(store, defaultAlias())
-    val identity = DeviceIdentity.loadOrCreate(File(dataDir, "identity.p12"), store)
+    val identities = FileIdentityStore(File(dataDir, "identity.p12"), store)
     val destination = settings.destination?.let(::File) ?: defaultDownloadDir()
     val engine = TransferEngine(
         DeviceType.DESKTOP,
         settings,
-        identity,
+        identities,
         LocalDestinationFolder(destination),
         historyFile = File(dataDir, "history.json"),
     )
@@ -180,6 +180,9 @@ private class DesktopActions(
 ) : PlatformActions {
     override val supportsDragAndDrop = true
 
+    // Desktops rarely have a usable camera; they show their code for a phone to scan instead.
+    override val supportsQrScanning = false
+
     // There is no portable desktop JVM API for the OS reduced-motion setting.
     override val reduceMotion = false
 
@@ -193,6 +196,8 @@ private class DesktopActions(
         }
         stageFiles(dialog.files.toList())
     }
+
+    override fun scanPairingQr() {}
 
     fun stageFiles(files: List<File>) {
         val (regular, other) = files.partition { it.isFile }

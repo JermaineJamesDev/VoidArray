@@ -77,7 +77,9 @@ import io.github.jermainejamesdev.voidarray.ui.FormationArray
 import io.github.jermainejamesdev.voidarray.ui.HistoryRow
 import io.github.jermainejamesdev.voidarray.ui.IncomingOfferDialog
 import io.github.jermainejamesdev.voidarray.ui.InkDivider
+import io.github.jermainejamesdev.voidarray.ui.PairingQrDialog
 import io.github.jermainejamesdev.voidarray.ui.PrimaryButton
+import io.github.jermainejamesdev.voidarray.ui.QrPairingDialog
 import io.github.jermainejamesdev.voidarray.ui.QuietButton
 import io.github.jermainejamesdev.voidarray.ui.ReceiveFolderCard
 import io.github.jermainejamesdev.voidarray.ui.ReceiveStatusCard
@@ -174,6 +176,21 @@ internal fun AppRoot(
                     onCopy = actions::copyToClipboard,
                 )
             }
+
+            val invite by controller.pairingInvite.collectAsState()
+            // An incoming offer takes precedence: both prompt the user, and the offer has the shorter fuse.
+            if (offer == null) {
+                invite?.let {
+                    PairingQrDialog(
+                        invite = it,
+                        fallbackEndpoint = local.addresses.firstOrNull()?.let { address -> "$address:${local.port}" },
+                        onRespond = controller::respondToPairingRequest,
+                        onClose = controller::closePairingQr,
+                    )
+                }
+            }
+            val qrPairing by controller.qrPairing.collectAsState()
+            qrPairing?.let { QrPairingDialog(it, onDismiss = controller::dismissQrPairing) }
 
             if (isDropTarget) DropOverlay()
         }
@@ -342,6 +359,8 @@ private fun DestinationContent(
                             onRescan = controller::rescan,
                             onAddManual = controller::addManualPeer,
                             onReview = { onNavigate(Destination.SETTINGS) },
+                            onShowQr = controller::showPairingQr,
+                            onScanQr = if (actions.supportsQrScanning) actions::scanPairingQr else null,
                         )
                     }
                     if (twoColumn) {
@@ -359,7 +378,15 @@ private fun DestinationContent(
                 }
 
                 Destination.RECEIVE -> {
-                    item { ReceiveStatusCard(local, local.deviceType, onCopy = actions::copyToClipboard) }
+                    item {
+                        ReceiveStatusCard(
+                            local,
+                            local.deviceType,
+                            discoverable = settings.discoverable,
+                            onCopy = actions::copyToClipboard,
+                            onShowQr = controller::showPairingQr,
+                        )
+                    }
                     transferSection(transfers.filter { it.direction == TransferDirection.RECEIVE }, controller, actions)
                     item {
                         ReceiveFolderCard(
@@ -386,7 +413,13 @@ private fun DestinationContent(
                 }
 
                 Destination.SETTINGS -> {
-                    item { DeviceSettingsCard(settings, onAliasChange = controller::setAlias) }
+                    item {
+                        DeviceSettingsCard(
+                            settings,
+                            onAliasChange = controller::setAlias,
+                            onDiscoverableChange = controller::setDiscoverable,
+                        )
+                    }
                     item {
                         ReceivingSettingsCard(
                             settings = settings,
@@ -408,6 +441,8 @@ private fun DestinationContent(
                             fingerprint = local.fingerprint,
                             trusted = trusted,
                             onForget = { controller.forgetDevice(it.deviceId) },
+                            onCopyKey = actions::copyToClipboard,
+                            onResetKey = controller::resetIdentity,
                         )
                     }
                     item { AboutCard(actions.appVersion) }

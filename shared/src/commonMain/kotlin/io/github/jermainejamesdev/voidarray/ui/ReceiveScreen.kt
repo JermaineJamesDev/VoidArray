@@ -27,7 +27,13 @@ import io.github.jermainejamesdev.voidarray.core.LocalStatus
 import io.github.jermainejamesdev.voidarray.protocol.DeviceType
 
 @Composable
-internal fun ReceiveStatusCard(local: LocalStatus, deviceType: DeviceType, onCopy: (String) -> Unit) {
+internal fun ReceiveStatusCard(
+    local: LocalStatus,
+    deviceType: DeviceType,
+    discoverable: Boolean,
+    onCopy: (String) -> Unit,
+    onShowQr: () -> Unit,
+) {
     val scheme = MaterialTheme.colorScheme
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -62,7 +68,11 @@ internal fun ReceiveStatusCard(local: LocalStatus, deviceType: DeviceType, onCop
                         )
                     }
                     Text(
-                        if (local.serverRunning) "Visible to devices on this network" else "Other devices cannot reach this one",
+                        when {
+                            !local.serverRunning -> "Other devices cannot reach this one"
+                            discoverable -> "Visible to devices on this network"
+                            else -> "Hidden from nearby devices. Pair with a QR code or IP address."
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = scheme.onSurfaceVariant,
                     )
@@ -77,9 +87,8 @@ internal fun ReceiveStatusCard(local: LocalStatus, deviceType: DeviceType, onCop
                         copyLabel = "Copy address",
                         onCopy = endpoints.takeIf { it.isNotEmpty() }?.let { { onCopy(it.first()) } },
                     )
+                    SecondaryButton("Show pairing QR", onClick = onShowQr, icon = AppIcons.QrCode)
                 }
-                val shortKey = local.fingerprint.split(' ').take(4).joinToString(" ")
-                DetailRow(label = "Key", value = shortKey, copyLabel = "Copy key fingerprint", onCopy = { onCopy(local.fingerprint) })
             }
         }
     }

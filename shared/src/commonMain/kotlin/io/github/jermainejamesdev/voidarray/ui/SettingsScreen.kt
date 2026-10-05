@@ -33,7 +33,11 @@ import io.github.jermainejamesdev.voidarray.core.TrustedDevice
 import io.github.jermainejamesdev.voidarray.core.UserSettings
 
 @Composable
-internal fun DeviceSettingsCard(settings: UserSettings, onAliasChange: (String) -> Unit) {
+internal fun DeviceSettingsCard(
+    settings: UserSettings,
+    onAliasChange: (String) -> Unit,
+    onDiscoverableChange: (Boolean) -> Unit,
+) {
     var alias by rememberSaveable { mutableStateOf(settings.alias) }
     // Follow external changes (e.g. the saved value after trimming) without clobbering edits in progress.
     LaunchedEffect(settings.alias) { alias = settings.alias }
@@ -54,6 +58,14 @@ internal fun DeviceSettingsCard(settings: UserSettings, onAliasChange: (String) 
             )
             PrimaryButton("Save", onClick = { onAliasChange(alias) }, enabled = changed)
         }
+        RowDivider()
+        SettingRow(
+            title = "Visible to nearby devices",
+            body = "Lets other devices on this network find this one by name. When off, pair with a QR code or IP address; " +
+                "devices that already know this one can still send to it.",
+        ) {
+            Switch(checked = settings.discoverable, onCheckedChange = onDiscoverableChange)
+        }
     }
 }
 
@@ -71,7 +83,7 @@ internal fun ReceivingSettingsCard(
         RowDivider()
         SettingRow(
             title = "Auto-accept from trusted devices",
-            body = "Skip the prompt for devices you have trusted. Other devices still ask.",
+            body = "Skip the prompt for devices you have trusted. Programs, and files from other devices, still ask.",
         ) {
             Switch(checked = settings.autoAcceptTrusted, onCheckedChange = onAutoAcceptChange)
         }
@@ -125,28 +137,58 @@ internal fun SecuritySettingsCard(
     fingerprint: String,
     trusted: List<TrustedDevice>,
     onForget: (TrustedDevice) -> Unit,
+    onCopyKey: (String) -> Unit,
+    onResetKey: () -> Unit,
 ) {
     var forgetting by remember { mutableStateOf<TrustedDevice?>(null) }
+    var showKey by rememberSaveable { mutableStateOf(false) }
+    var confirmReset by remember { mutableStateOf(false) }
     val mono = VoidArrayTheme.extras.mono
     SectionCard(
         title = "Security",
         subtitle = "Transfers are encrypted. Devices are identified by their key.",
     ) {
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            GroupLabel("This device's key")
-            Text(
-                fingerprint,
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = mono,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("This device's key", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "Identifies this device to others. It is not a secret.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                QuietButton(if (showKey) "Hide details" else "Show details", onClick = { showKey = !showKey })
+            }
+            if (showKey) {
+                InsetRow {
+                    Text(
+                        // Two lines of eight groups read more easily than one wrapped run.
+                        fingerprint.split(' ').chunked(8).joinToString("\n") { it.joinToString(" ") },
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = mono,
+                        modifier = Modifier.weight(1f),
+                    )
+                    IconButton(onClick = { onCopyKey(fingerprint) }) {
+                        Icon(AppIcons.Copy, contentDescription = "Copy key fingerprint", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                Text(
+                    "This is a fingerprint of the public half of the key; the private half never leaves this device. " +
+                        "Other devices list it by its first 16 characters under Trusted devices. If those match, they " +
+                        "paired with this device and not an impostor.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                QuietButton("Reset key", onClick = { confirmReset = true }, color = MaterialTheme.colorScheme.error)
+            }
         }
         RowDivider()
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             GroupLabel("Trusted devices")
             if (trusted.isEmpty()) {
                 Text(
-                    "None yet. Tick \"Trust this device\" when accepting a transfer.",
+                    "None yet. Pair with a QR code, or tick \"Codes match\" when accepting a transfer.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -182,6 +224,26 @@ internal fun SecuritySettingsCard(
                 }, color = MaterialTheme.colorScheme.error)
             },
             dismissButton = { QuietButton("Cancel", onClick = { forgetting = null }) },
+        )
+    }
+    if (confirmReset) {
+        AlertDialog(
+            onDismissRequest = { confirmReset = false },
+            title = { Text("Reset this device's key?") },
+            text = {
+                Text(
+                    "VoidArray creates a new key for this device. Devices that trusted it will show \"Key changed\" and " +
+                        "stop sending to it until you pair them again. Do this if the key may have been copied, for " +
+                        "example from a lost USB drive with the portable app.",
+                )
+            },
+            confirmButton = {
+                QuietButton("Reset key", onClick = {
+                    confirmReset = false
+                    onResetKey()
+                }, color = MaterialTheme.colorScheme.error)
+            },
+            dismissButton = { QuietButton("Cancel", onClick = { confirmReset = false }) },
         )
     }
 }

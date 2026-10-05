@@ -3,27 +3,15 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
-    <!-- Required for MulticastLock; without it inbound discovery packets are silently filtered. -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
-    <!-- Required by WifiManager.WifiLock. -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!--
-        Required with targetSdk 37: Android 17 blocks all LAN traffic (TCP both ways, UDP multicast and
-        broadcast) without it. Requested at runtime by LocalNetworkPermissionGate. It is in the Nearby
-        devices group and is ignored on Android 16 and below. Remove it if targetSdk ever drops below 37,
-        where declaring it is not allowed.
-    -->
     <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
-    <!--
-        Backup is off so a restore onto a new phone cannot clone this install's device id and key, which
-        would make the two phones filter each other out as "self" and let either impersonate the other.
-        allowBackup covers Android 11 and below; dataExtractionRules also covers device-to-device
-        transfer on Android 12+, which allowBackup alone does not stop.
-    -->
     <application
         android:name=".VoidArrayApplication"
         android:allowBackup="false"
@@ -54,6 +42,10 @@
                 <data android:mimeType="*/*" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".QrScanActivity"
+            android:exported="false" />
 
         <service
             android:name=".TransferService"

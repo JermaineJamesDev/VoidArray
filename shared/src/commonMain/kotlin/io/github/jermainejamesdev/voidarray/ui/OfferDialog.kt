@@ -42,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import io.github.jermainejamesdev.voidarray.core.IncomingOffer
+import io.github.jermainejamesdev.voidarray.core.looksExecutable
 import kotlinx.coroutines.delay
 
 /**
@@ -51,9 +52,8 @@ import kotlinx.coroutines.delay
 private const val ACCEPT_ARMING_MILLIS = 1_000L
 
 /**
- * The accept prompt: a bottom sheet on phones and a centered panel on wide windows. It cannot be
- * dismissed by tapping outside or pressing back, which would leave the sender waiting until the prompt
- * times out; the user answers with Accept or Decline.
+ * The accept prompt. It cannot be dismissed by tapping outside or pressing back, which would leave the
+ * sender waiting until the prompt times out; the user answers with Accept or Decline.
  */
 @Composable
 internal fun IncomingOfferDialog(
@@ -61,9 +61,25 @@ internal fun IncomingOfferDialog(
     onRespond: (accept: Boolean, trust: Boolean) -> Unit,
     onCopy: (String) -> Unit,
 ) {
+    AdaptiveSheet(onDismissRequest = null) { asSheet, modifier ->
+        OfferContent(offer, onRespond, onCopy, asSheet = asSheet, modifier = modifier)
+    }
+}
+
+/**
+ * A bottom sheet on phones and a centered panel on wide windows. [content] receives whether it is a sheet
+ * and the modifier that keeps it clear of the navigation bar. With a null [onDismissRequest] only the
+ * content's own buttons can close it.
+ */
+@Composable
+internal fun AdaptiveSheet(
+    onDismissRequest: (() -> Unit)?,
+    content: @Composable (asSheet: Boolean, modifier: Modifier) -> Unit,
+) {
+    val dismissible = onDismissRequest != null
     Dialog(
-        onDismissRequest = {},
-        properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false, usePlatformDefaultWidth = false),
+        onDismissRequest = { onDismissRequest?.invoke() },
+        properties = DialogProperties(dismissOnBackPress = dismissible, dismissOnClickOutside = dismissible, usePlatformDefaultWidth = false),
     ) {
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
             val wide = maxWidth >= 600.dp
@@ -76,16 +92,16 @@ internal fun IncomingOfferDialog(
                 shape = if (wide) MaterialTheme.shapes.extraLarge else CutCornerShape(topStart = 16.dp, topEnd = 16.dp),
                 color = MaterialTheme.colorScheme.surfaceContainerLow,
             ) {
-                OfferContent(
-                    offer,
-                    onRespond,
-                    onCopy,
-                    asSheet = !wide,
-                    modifier = if (wide) Modifier else Modifier.windowInsetsPadding(WindowInsets.navigationBars),
-                )
+                content(!wide, if (wide) Modifier else Modifier.windowInsetsPadding(WindowInsets.navigationBars))
             }
         }
     }
+}
+
+/** The drag-handle bar at the top of a bottom sheet. */
+@Composable
+internal fun SheetHandle(modifier: Modifier = Modifier) {
+    Box(modifier.width(36.dp).height(4.dp).clip(CircleShape).background(MaterialTheme.colorScheme.outlineVariant))
 }
 
 @Composable
@@ -111,9 +127,7 @@ private fun OfferContent(
             .padding(start = 22.dp, end = 22.dp, top = if (asSheet) 12.dp else 24.dp, bottom = 22.dp),
         verticalArrangement = Arrangement.spacedBy(18.dp),
     ) {
-        if (asSheet) {
-            Box(Modifier.align(Alignment.CenterHorizontally).width(36.dp).height(4.dp).clip(CircleShape).background(scheme.outlineVariant))
-        }
+        if (asSheet) SheetHandle(Modifier.align(Alignment.CenterHorizontally))
 
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
             if (offer.identityChanged) {
@@ -205,9 +219,9 @@ private fun OfferContent(
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("Trust this device", style = MaterialTheme.typography.bodyLarge)
+                    Text("Codes match. Trust this device", style = MaterialTheme.typography.bodyLarge)
                     Text(
-                        "Remember its key so later transfers can skip this prompt.",
+                        "Tick only if ${offer.sender.alias} shows the same code. Its key is then remembered so later transfers can skip this prompt.",
                         style = MaterialTheme.typography.bodySmall,
                         color = scheme.onSurfaceVariant,
                     )

@@ -37,6 +37,11 @@ internal class DiscoveryService(
      * falls back to UDP.
      */
     private val onAnnouncement: suspend (info: DeviceInfo, address: String, replyRequested: Boolean) -> Boolean,
+    /**
+     * When false this device sends nothing, not even replies, but still listens so it can list others.
+     * [onAnnouncement] is expected to verify without registering itself in that case.
+     */
+    private val visible: () -> Boolean,
     private val log: (String) -> Unit,
 ) {
     private val lastHandled = ConcurrentHashMap<String, Long>()
@@ -101,6 +106,7 @@ internal class DiscoveryService(
 
     /** Sends an announcement out of every interface, by multicast and by directed broadcast. */
     fun announce() {
+        if (!visible()) return
         val payload = encode(Announcement(selfInfo(), announce = true))
         synchronized(this) {
             val s = socket ?: return
@@ -143,7 +149,7 @@ internal class DiscoveryService(
             scope.launch {
                 try {
                     val reached = onAnnouncement(announcement.info, senderHost, announcement.announce)
-                    if (announcement.announce && !reached) replyViaUdp(sender)
+                    if (announcement.announce && !reached && visible()) replyViaUdp(sender)
                 } finally {
                     verifications.release()
                 }

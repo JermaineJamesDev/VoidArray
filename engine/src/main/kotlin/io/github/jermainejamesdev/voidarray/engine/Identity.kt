@@ -7,26 +7,28 @@ import java.io.File
 import java.net.Socket
 import java.security.KeyStore
 import java.security.MessageDigest
+import java.security.Principal
 import java.security.PrivateKey
 import java.security.PublicKey
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
-import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLEngine
 import javax.net.ssl.SSLServerSocket
 import javax.net.ssl.SSLSocket
+import javax.net.ssl.X509ExtendedKeyManager
 import javax.net.ssl.X509ExtendedTrustManager
 import javax.security.auth.x500.X500Principal
 
 /**
- * This install's TLS identity: a self-signed certificate generated on first run and kept in a PKCS12
- * file. Peers never validate the certificate chain; they pin the SHA-256 of its public key (SPKI), so
- * the certificate could be re-issued around the same key without breaking existing pairings.
+ * This install's TLS identity: a key and a self-signed certificate for it. Peers never validate the
+ * certificate chain; they pin the SHA-256 of its public key (SPKI), so the certificate could be re-issued
+ * around the same key without breaking existing pairings. [privateKey] may be a handle to a key that
+ * cannot be exported, such as one held by the Android Keystore.
  */
-class DeviceIdentity private constructor(
-    private val privateKey: PrivateKey,
-    private val certificate: X509Certificate,
+class DeviceIdentity(
+    val privateKey: PrivateKey,
+    val certificate: X509Certificate,
 ) {
     val fingerprint: String = spkiFingerprint(certificate.publicKey)
 
@@ -34,43 +36,14 @@ class DeviceIdentity private constructor(
      * One context for both directions: it presents this identity as a server certificate and as a client
      * certificate, and accepts any peer chain because authentication is the SPKI pin checked by the caller.
      */
-    internal fun sslContext(): SSLContext {
-        val password = CharArray(0)
-        val store = KeyStore.getInstance(KeyStore.getDefaultType()).apply {
-            load(null, null)
-            setKeyEntry(ALIAS, privateKey, password, arrayOf(certificate))
+    internal fun sslContext(): SSLContext =
+        SSLContext.getInstance("TLS").apply {
+            init(arrayOf(SingleKeyManager(privateKey, certificate)), arrayOf(PinnedByCallerTrustManager), SecureRandom())
         }
-        val keyManagers = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
-            .apply { init(store, password) }
-            .keyManagers
-        return SSLContext.getInstance("TLS").apply { init(keyManagers, arrayOf(PinnedByCallerTrustManager), SecureRandom()) }
-    }
 
     companion object {
-        private const val ALIAS = "voidarray"
-        private const val PASSWORD_KEY = "identityPassword"
-
-        /**
-         * Loads the identity from [file], creating it if missing or unreadable. The keystore password lives
-         * in [store]; it only guards against casual copying, since both sit in app-private storage.
-         */
-        fun loadOrCreate(file: File, store: KeyValueStore): DeviceIdentity {
-            val password = store.get(PASSWORD_KEY)
-            if (password != null && file.isFile) {
-                runCatching { load(file, password.toCharArray()) }.getOrNull()?.let { return it }
-            }
-            return create(file, store)
-        }
-
-        private fun load(file: File, password: CharArray): DeviceIdentity {
-            val keyStore = KeyStore.getInstance("PKCS12")
-            file.inputStream().use { keyStore.load(it, password) }
-            val key = keyStore.getKey(ALIAS, password) as PrivateKey
-            val cert = keyStore.getCertificate(ALIAS) as X509Certificate
-            return DeviceIdentity(key, cert)
-        }
-
-        private fun create(file: File, store: KeyValueStore): DeviceIdentity {
+        /** A new 2048-bit RSA key with a ten-year self-signed certificate, generated in software. */
+        fun generate(): DeviceIdentity {
             val password = ByteArray(24).also(SecureRandom()::nextBytes).toHex()
             // buildKeyStore's defaults (SHA-1, 1024-bit RSA, 3 days) would be refused by modern TLS stacks.
             val generated = buildKeyStore {
@@ -84,19 +57,99 @@ class DeviceIdentity private constructor(
                     subject = X500Principal("CN=VoidArray")
                 }
             }
-            val key = generated.getKey(ALIAS, password.toCharArray()) as PrivateKey
-            val cert = generated.getCertificate(ALIAS) as X509Certificate
-
-            // PKCS12 is readable on both Android and desktop JVMs, unlike each platform's default type.
-            val pkcs12 = KeyStore.getInstance("PKCS12").apply {
-                load(null, null)
-                setKeyEntry(ALIAS, key, password.toCharArray(), arrayOf(cert))
-            }
-            writeFileAtomically(file) { pkcs12.store(it, password.toCharArray()) }
-            store.put(PASSWORD_KEY, password)
-            return DeviceIdentity(key, cert)
+            return DeviceIdentity(
+                generated.getKey(ALIAS, password.toCharArray()) as PrivateKey,
+                generated.getCertificate(ALIAS) as X509Certificate,
+            )
         }
+
+        internal const val ALIAS = "voidarray"
     }
+}
+
+/** Where an identity is kept. Platforms with a hardware-backed key store provide their own. */
+interface IdentityStore {
+    /** Returns the stored identity, creating one on first use. */
+    fun load(): DeviceIdentity
+
+    /** Discards the stored identity and returns a newly created one. */
+    fun replace(): DeviceIdentity
+}
+
+/**
+ * Keeps the identity in a PKCS12 file. The keystore password lives in [store]; it only guards against
+ * casual copying, since both sit in the same private folder.
+ */
+class FileIdentityStore(private val file: File, private val store: KeyValueStore) : IdentityStore {
+    override fun load(): DeviceIdentity = readExisting() ?: replace()
+
+    override fun replace(): DeviceIdentity = DeviceIdentity.generate().also(::save)
+
+    /** The identity in the file, or null if there is none or it cannot be read. */
+    fun readExisting(): DeviceIdentity? {
+        val password = store.get(PASSWORD_KEY)?.toCharArray() ?: return null
+        if (!file.isFile) return null
+        return runCatching {
+            val keyStore = KeyStore.getInstance("PKCS12")
+            file.inputStream().use { keyStore.load(it, password) }
+            DeviceIdentity(
+                keyStore.getKey(DeviceIdentity.ALIAS, password) as PrivateKey,
+                keyStore.getCertificate(DeviceIdentity.ALIAS) as X509Certificate,
+            )
+        }.getOrNull()
+    }
+
+    /** Removes the file and its password, once the identity has moved somewhere safer. */
+    fun delete() {
+        file.delete()
+        store.put(PASSWORD_KEY, null)
+    }
+
+    private fun save(identity: DeviceIdentity) {
+        val password = ByteArray(24).also(SecureRandom()::nextBytes).toHex()
+        // PKCS12 is readable on both Android and desktop JVMs, unlike each platform's default type.
+        val pkcs12 = KeyStore.getInstance("PKCS12").apply {
+            load(null, null)
+            setKeyEntry(DeviceIdentity.ALIAS, identity.privateKey, password.toCharArray(), arrayOf(identity.certificate))
+        }
+        writeFileAtomically(file) { pkcs12.store(it, password.toCharArray()) }
+        store.put(PASSWORD_KEY, password)
+    }
+
+    private companion object {
+        const val PASSWORD_KEY = "identityPassword"
+    }
+}
+
+/**
+ * Presents one key in both directions. A KeyManagerFactory would first copy the key into an in-memory
+ * KeyStore, which fails for keys that cannot be exported; handing out the key object directly lets the TLS
+ * provider delegate signing to whichever provider owns it.
+ */
+private class SingleKeyManager(
+    private val key: PrivateKey,
+    private val certificate: X509Certificate,
+) : X509ExtendedKeyManager() {
+    // Matching on the exact algorithm matters: offering an "RSA" key for "RSASSA-PSS" would make JSSE
+    // choose a signature scheme the key cannot produce.
+    private fun aliasFor(keyType: String?): String? =
+        DeviceIdentity.ALIAS.takeIf { keyType.equals(key.algorithm, ignoreCase = true) }
+
+    private fun aliasFor(keyTypes: Array<out String>?): String? =
+        DeviceIdentity.ALIAS.takeIf { keyTypes.orEmpty().any { it.equals(key.algorithm, ignoreCase = true) } }
+
+    override fun chooseClientAlias(keyType: Array<out String>?, issuers: Array<out Principal>?, socket: Socket?) = aliasFor(keyType)
+    override fun chooseServerAlias(keyType: String?, issuers: Array<out Principal>?, socket: Socket?) = aliasFor(keyType)
+    override fun chooseEngineClientAlias(keyType: Array<out String>?, issuers: Array<out Principal>?, engine: SSLEngine?) = aliasFor(keyType)
+    override fun chooseEngineServerAlias(keyType: String?, issuers: Array<out Principal>?, engine: SSLEngine?) = aliasFor(keyType)
+
+    override fun getClientAliases(keyType: String?, issuers: Array<out Principal>?) = aliasFor(keyType)?.let { arrayOf(it) }
+    override fun getServerAliases(keyType: String?, issuers: Array<out Principal>?) = aliasFor(keyType)?.let { arrayOf(it) }
+
+    override fun getCertificateChain(alias: String?): Array<X509Certificate>? =
+        if (alias == DeviceIdentity.ALIAS) arrayOf(certificate) else null
+
+    override fun getPrivateKey(alias: String?): PrivateKey? = if (alias == DeviceIdentity.ALIAS) key else null
 }
 
 /**

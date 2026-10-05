@@ -7,7 +7,8 @@ import kotlinx.serialization.json.Json
 /**
  * Version 2 moved the API to HTTPS with SPKI-pinned certificates. Version 3 requires a client certificate
  * on every request that changes state and derives the pairing code from committed per-transfer nonces.
- * Peers on other versions cannot interoperate.
+ * Peers on other versions cannot interoperate. [Routes.QR_PAIR] was added within version 3; a peer without
+ * it answers 404, which only means it cannot pair by QR code.
  */
 const val PROTOCOL_VERSION = 3
 
@@ -24,6 +25,7 @@ object Routes {
     const val INFO = "/api/v1/info"
     const val REGISTER = "/api/v1/register"
     const val PAIR = "/api/v1/pair"
+    const val QR_PAIR = "/api/v1/pair/qr"
     const val PREPARE = "/api/v1/prepare"
     const val UPLOAD = "/api/v1/upload"
     const val CANCEL = "/api/v1/cancel"
@@ -87,6 +89,17 @@ data class PairResponse(
     val pairingId: String,
     /** The receiver's nonce, hex. */
     val nonce: String,
+)
+
+/**
+ * Sent by a device that scanned another's pairing QR code. The scanner already pinned the key from the
+ * code; [token], also from the code, proves to the device showing it that the caller saw its screen. The
+ * response is the shower's [DeviceInfo].
+ */
+@Serializable
+data class QrPairRequest(
+    val sender: DeviceInfo,
+    val token: String,
 )
 
 @Serializable

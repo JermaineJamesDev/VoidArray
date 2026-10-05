@@ -42,6 +42,10 @@ class MainActivity : ComponentActivity() {
         if (uri != null) app.useDestination(uri)
     }
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+    private val scanQr = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val text = result.data?.getStringExtra(QrScanActivity.EXTRA_TEXT)
+        if (result.resultCode == RESULT_OK && text != null) app.engine.pairWithQr(text)
+    }
 
     private var multicastLock: WifiManager.MulticastLock? = null
 
@@ -50,12 +54,17 @@ class MainActivity : ComponentActivity() {
         override val supportsTray = false
         override val supportsDragAndDrop = false
 
+        // A getter because this object is built before the activity is attached to its context.
+        override val supportsQrScanning: Boolean
+            get() = packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)
+
         // "Remove animations" in accessibility settings sets the animator scale to 0.
         override val reduceMotion: Boolean
             get() = Settings.Global.getFloat(contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f
 
         override fun pickFilesToSend() = pickFiles.launch(arrayOf("*/*"))
         override fun pickDestinationFolder() = pickFolder.launch(null)
+        override fun scanPairingQr() = scanQr.launch(Intent(this@MainActivity, QrScanActivity::class.java))
 
         override fun openReceivedFolder() {
             val tree = (app.engine.currentDestination as? SafTreeDestination)?.treeUri
