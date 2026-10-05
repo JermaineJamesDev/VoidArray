@@ -26,8 +26,9 @@ transfer logic go in `engine`, UI in `shared`, and platform glue in `androidApp`
 - Write comments that explain why, not what; the code should say what it does.
 - Add or update tests in `engine/src/test` for any change to the protocol, transfer, storage, or security
   code. These run over real HTTPS on loopback.
-- Changes to the wire protocol must bump `PROTOCOL_VERSION` in `core/.../protocol/Protocol.kt`, since
-  mixed versions cannot interoperate.
+- Breaking changes to the wire protocol must bump `PROTOCOL_VERSION` in `core/.../protocol/Protocol.kt`,
+  since mixed versions cannot interoperate. A new optional route can be added without a bump if older
+  peers answering 404 is handled with a clear message, as QR pairing does.
 - New dependencies should be discussed in the issue or pull request first.
 
 ## UI changes and screenshots

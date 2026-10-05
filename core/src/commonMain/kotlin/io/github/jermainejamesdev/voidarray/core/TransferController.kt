@@ -17,9 +17,27 @@ interface TransferController {
     val history: StateFlow<List<HistoryEntry>>
     val trustedDevices: StateFlow<List<TrustedDevice>>
 
+    /** The pairing QR code this device is showing, or null when none is open. */
+    val pairingInvite: StateFlow<PairingInvite?>
+
+    /** Progress of pairing with a QR code scanned on this device, or null when none is under way. */
+    val qrPairing: StateFlow<QrPairingState?>
+
     /** Re-announces on every interface and sweeps the local /24 subnets for peers. */
     fun rescan()
     fun addManualPeer(host: String, port: Int)
+
+    /** Opens a new single-use pairing QR code, replacing any open one. */
+    fun showPairingQr()
+    fun closePairingQr()
+
+    /** Answers [PairingInvite.request]; accepting makes the two devices trust each other. */
+    fun respondToPairingRequest(accept: Boolean)
+
+    /** Pairs with the device whose QR code produced [text]. Progress is reported through [qrPairing]. */
+    fun pairWithQr(text: String)
+    fun dismissQrPairing()
+
     fun removeStaged(index: Int)
     fun clearStaged()
     fun setStagedText(text: String)
@@ -35,8 +53,17 @@ interface TransferController {
     fun setAutoAcceptTrusted(enabled: Boolean)
     fun setTheme(mode: ThemeMode)
     fun setMinimizeToTray(enabled: Boolean)
+
+    /** Whether this device announces itself and answers other devices' announcements. */
+    fun setDiscoverable(enabled: Boolean)
     fun forgetDevice(deviceId: String)
     fun clearHistory()
+
+    /**
+     * Replaces this device's key with a new one. Devices that trusted the old key see it as changed and
+     * stop sending to it until they pair again. Refused while a transfer is active.
+     */
+    fun resetIdentity()
 }
 
 /** Platform-specific actions that need native pickers, system services, or permission prompts. */
@@ -45,10 +72,16 @@ interface PlatformActions {
     val supportsTray: Boolean
     val supportsDragAndDrop: Boolean
 
+    /** The device has a camera to scan another device's pairing QR code with. */
+    val supportsQrScanning: Boolean
+
     /** The user turned animations off system-wide; decorative motion should stay still. */
     val reduceMotion: Boolean
 
     fun pickFilesToSend()
+
+    /** Opens the camera to scan a pairing QR code, then hands the result to [TransferController.pairWithQr]. */
+    fun scanPairingQr()
     fun pickDestinationFolder()
     fun openReceivedFolder()
     fun copyToClipboard(text: String)
@@ -84,7 +117,44 @@ data class UserSettings(
     val autoAcceptTrusted: Boolean = false,
     val theme: ThemeMode = ThemeMode.SYSTEM,
     val minimizeToTray: Boolean = true,
+    val discoverable: Boolean = true,
 )
+
+/**
+ * A square QR code, row by row, without the quiet zone. [isDark] reads one module.
+ * Equality is by reference; a new code is a new object.
+ */
+class QrMatrix(val size: Int, private val modules: BooleanArray) {
+    init {
+        require(modules.size == size * size) { "Expected ${size * size} modules, got ${modules.size}" }
+    }
+
+    fun isDark(x: Int, y: Int): Boolean = modules[y * size + x]
+}
+
+/** A device that scanned this device's pairing code and is waiting for the user to confirm it. */
+data class PairingRequest(
+    val alias: String,
+    val deviceType: DeviceType,
+    val fingerprint: String,
+)
+
+data class PairingInvite(
+    /** The text encoded in [qr]: where this device listens, its key, and a single-use token. */
+    val uri: String,
+    val qr: QrMatrix,
+    val expiresAtMillis: Long,
+    /** Set once a device has scanned the code and presented the token. */
+    val request: PairingRequest? = null,
+)
+
+sealed interface QrPairingState {
+    data object Connecting : QrPairingState
+    /** The other device was reached and verified; its user has to confirm the pairing. */
+    data class WaitingForConfirmation(val alias: String) : QrPairingState
+    data class Paired(val alias: String) : QrPairingState
+    data class Failed(val message: String) : QrPairingState
+}
 
 @Serializable
 data class TrustedDevice(

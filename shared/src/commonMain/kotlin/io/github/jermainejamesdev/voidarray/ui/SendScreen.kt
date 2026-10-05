@@ -3,6 +3,7 @@ package io.github.jermainejamesdev.voidarray.ui
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -131,6 +132,9 @@ internal fun DevicesCard(
     onRescan: () -> Unit,
     onAddManual: (String, Int) -> Unit,
     onReview: () -> Unit,
+    onShowQr: () -> Unit,
+    /** Null where there is no camera to scan with. */
+    onScanQr: (() -> Unit)?,
 ) {
     var host by rememberSaveable { mutableStateOf("") }
     var port by rememberSaveable { mutableStateOf(DEFAULT_PORT.toString()) }
@@ -154,7 +158,7 @@ internal fun DevicesCard(
             EmptyState(
                 icon = AppIcons.Computer,
                 title = if (enabled) "Forming the array" else "Not receiving",
-                body = "Looking for other VoidArray devices on this network. Open VoidArray on the other device, or add it by IP address.",
+                body = "Looking for other VoidArray devices on this network. Open VoidArray on the other device, or pair with a QR code or IP address.",
                 art = { FormationArray(modifier = Modifier.size(64.dp), spinning = enabled, periodMillis = 8_000) },
             )
         } else {
@@ -202,7 +206,11 @@ internal fun DevicesCard(
                 QuietButton("Cancel", onClick = { showManual = false })
             }
         } else {
-            QuietButton("Add a device by IP address", onClick = { showManual = true }, enabled = enabled, icon = AppIcons.Add)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (onScanQr != null) SecondaryButton("Scan QR code", onClick = onScanQr, enabled = enabled, icon = AppIcons.QrScanner)
+                QuietButton("Show pairing QR", onClick = onShowQr, enabled = enabled, icon = AppIcons.QrCode)
+                QuietButton("Add by IP address", onClick = { showManual = true }, enabled = enabled, icon = AppIcons.Add)
+            }
         }
     }
 }

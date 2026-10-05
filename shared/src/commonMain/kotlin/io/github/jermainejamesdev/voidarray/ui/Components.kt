@@ -31,6 +31,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import io.github.jermainejamesdev.voidarray.core.looksExecutable
 import io.github.jermainejamesdev.voidarray.protocol.DeviceType
 
 /** A screen section: a tonal card with a title row. Depth comes from surface lightness, not borders. */
@@ -336,12 +337,3 @@ internal fun looksLikeUrl(text: String): Boolean {
     val trimmed = text.trim()
     return trimmed.none { it.isWhitespace() } && (trimmed.startsWith("http://") || trimmed.startsWith("https://"))
 }
-
-private val executableExtensions = setOf(
-    "exe", "msi", "msix", "appx", "bat", "cmd", "com", "scr", "pif", "cpl", "ps1", "psm1", "vbs", "vbe", "js", "jse",
-    "wsf", "wsh", "hta", "lnk", "reg", "jar", "dll", "apk", "aab", "xapk", "sh", "command", "app", "dmg", "pkg",
-)
-
-/** File types that run code when opened, so the user is told before accepting them from another device. */
-internal fun looksExecutable(name: String): Boolean =
-    name.substringAfterLast('.', "").lowercase() in executableExtensions

@@ -1,9 +1,10 @@
 # Releasing
 
 Publishing a GitHub release runs [release.yml](../.github/workflows/release.yml), which builds the signed
-Android APK and the portable Windows ZIP and attaches them, with SHA-256 checksums, to the release. The
-Windows EXE and MSI installers are not published; they can still be built locally with
-`./gradlew :desktopApp:packageExe` or `:desktopApp:packageMsi`.
+Android APK, the Windows EXE and MSI installers and the portable Windows ZIP, and attaches them to the
+release with SHA-256 checksums and the APK's signing certificate. It also records a signed build
+provenance attestation for each file, which users can check with `gh attestation verify`. Attestations
+are free for public repositories; a private repository needs GitHub Enterprise Cloud.
 
 ## One-time setup: Android signing key
 
@@ -42,8 +43,14 @@ must be created once and kept forever.
 2. Create a release on GitHub with a new tag named `vX.Y.Z`, for example `v1.2.0`.
 3. Publish it. The workflow attaches these files within a few minutes:
    - `VoidArray-X.Y.Z.apk`
+   - `VoidArray-X.Y.Z-setup.exe`
+   - `VoidArray-X.Y.Z.msi`
    - `VoidArray-X.Y.Z-portable.zip`
    - a `.sha256` file for each
+   - `VoidArray-X.Y.Z.apk.cert.txt`, the signing certificate's DN and SHA-256 digest
+4. Check that the digest in `.cert.txt` matches the previous release. It also appears in the Android job's
+   summary. A different digest means the APK was signed with a different key, and existing installs will
+   refuse to update.
 
 ### Version rules
 
@@ -57,7 +64,7 @@ must be created once and kept forever.
 
 Run the **Release** workflow manually from the Actions tab and enter a version. It builds everything and
 uploads the files as workflow artifacts instead of attaching them to a release. The signing secrets are
-still required.
+still required. No attestations are made for manual runs, since nothing is published.
 
 ## Signing locally
 

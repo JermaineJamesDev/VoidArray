@@ -6,6 +6,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class IdentityTest {
@@ -23,16 +24,65 @@ class IdentityTest {
         try {
             val store = MemoryStore()
             val file = File(dir, "identity.p12")
-            val first = DeviceIdentity.loadOrCreate(file, store)
-            val second = DeviceIdentity.loadOrCreate(file, store)
+            val first = FileIdentityStore(file, store).load()
+            val second = FileIdentityStore(file, store).load()
             assertEquals(first.fingerprint, second.fingerprint)
             assertTrue(first.fingerprint.matches(Regex("[0-9A-F]{64}")))
 
-            val other = DeviceIdentity.loadOrCreate(File(dir, "other.p12"), MemoryStore())
+            val other = FileIdentityStore(File(dir, "other.p12"), MemoryStore()).load()
             assertNotEquals(first.fingerprint, other.fingerprint)
         } finally {
             dir.deleteRecursively()
         }
+    }
+
+    @Test
+    fun replaceSwapsTheStoredKeyAndDeleteRemovesIt() {
+        val dir = Files.createTempDirectory("voidarray-identity").toFile()
+        try {
+            val store = MemoryStore()
+            val identities = FileIdentityStore(File(dir, "identity.p12"), store)
+            val original = identities.load()
+            val replaced = identities.replace()
+            assertNotEquals(original.fingerprint, replaced.fingerprint)
+            assertEquals(replaced.fingerprint, FileIdentityStore(File(dir, "identity.p12"), store).load().fingerprint)
+
+            identities.delete()
+            assertNull(identities.readExisting())
+            assertNull(store.get("identityPassword"))
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun pairingLinkRoundTripsAndRejectsUnsafeTargets() {
+        val fingerprint = "AB".repeat(32)
+        val token = "0f".repeat(16)
+        val link = PairingLink(fingerprint, 53318, listOf("192.168.1.20", "10.0.0.5"), token)
+        assertEquals(link, PairingLink.parse(link.toUri()))
+        assertEquals(link, PairingLink.parse("  ${link.toUri().replace(fingerprint, fingerprint.lowercase())}\n"))
+
+        fun withAddresses(addresses: String) = "voidarray://pair?v=1&k=$fingerprint&p=53318&a=$addresses&t=$token"
+        // Host names would be resolved over DNS, and public addresses are outside the local network.
+        assertNull(PairingLink.parse(withAddresses("example.com")))
+        assertNull(PairingLink.parse(withAddresses("8.8.8.8")))
+        assertEquals(listOf("192.168.1.20"), PairingLink.parse(withAddresses("8.8.8.8,192.168.1.20"))?.addresses)
+
+        assertNull(PairingLink.parse("https://example.com/?k=$fingerprint"))
+        assertNull(PairingLink.parse(withAddresses("192.168.1.20").replace("v=1", "v=2")))
+        assertNull(PairingLink.parse(withAddresses("192.168.1.20").replace("p=53318", "p=70000")))
+        assertNull(PairingLink.parse(withAddresses("192.168.1.20").replace(token, "short")))
+        assertNull(PairingLink.parse(withAddresses("192.168.1.20").replace(fingerprint, "AB")))
+    }
+
+    @Test
+    fun qrMatrixIsSquareWithFinderPatterns() {
+        val qr = encodeQr(PairingLink("AB".repeat(32), 53318, listOf("192.168.1.20"), "0f".repeat(16)).toUri())
+        // Finder patterns: the corners are dark and the module just inside the outer ring is light.
+        for ((x, y) in listOf(0 to 0, qr.size - 1 to 0, 0 to qr.size - 1)) assertTrue(qr.isDark(x, y))
+        assertFalse(qr.isDark(1, 1))
+        assertTrue(qr.size >= 21 && (qr.size - 17) % 4 == 0, "not a valid QR size: ${qr.size}")
     }
 
     @Test

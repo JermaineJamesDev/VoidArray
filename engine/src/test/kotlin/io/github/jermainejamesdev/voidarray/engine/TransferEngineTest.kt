@@ -1,15 +1,18 @@
 package io.github.jermainejamesdev.voidarray.engine
 
+import io.github.jermainejamesdev.voidarray.core.QrPairingState
 import io.github.jermainejamesdev.voidarray.core.TransferStatus
 import io.github.jermainejamesdev.voidarray.protocol.DeviceInfo
 import io.github.jermainejamesdev.voidarray.protocol.DeviceType
 import io.github.jermainejamesdev.voidarray.protocol.FileMeta
 import io.github.jermainejamesdev.voidarray.protocol.PairRequest
 import io.github.jermainejamesdev.voidarray.protocol.PrepareRequest
+import io.github.jermainejamesdev.voidarray.protocol.QrPairRequest
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -22,6 +25,7 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -51,14 +55,16 @@ class TransferEngineTest {
         destDir = File(root, "dest").apply { mkdirs() }
         senderSettings = AppSettings(MemoryStore(), "Sender")
         receiverSettings = AppSettings(MemoryStore(), "Receiver")
-        senderIdentity = DeviceIdentity.loadOrCreate(File(root, "sender.p12"), senderSettings.store)
-        receiverIdentity = DeviceIdentity.loadOrCreate(File(root, "receiver.p12"), receiverSettings.store)
+        val senderStore = FileIdentityStore(File(root, "sender.p12"), senderSettings.store)
+        val receiverStore = FileIdentityStore(File(root, "receiver.p12"), receiverSettings.store)
+        senderIdentity = senderStore.load()
+        receiverIdentity = receiverStore.load()
         sender = TransferEngine(
-            DeviceType.DESKTOP, senderSettings, senderIdentity,
+            DeviceType.DESKTOP, senderSettings, senderStore,
             LocalDestinationFolder(File(root, "unused")), log = { println("sender: $it") },
         )
         receiver = TransferEngine(
-            DeviceType.MOBILE, receiverSettings, receiverIdentity,
+            DeviceType.MOBILE, receiverSettings, receiverStore,
             LocalDestinationFolder(destDir), historyFile = File(root, "history.json"), log = {},
         )
         sender.start { true }
@@ -209,7 +215,7 @@ class TransferEngineTest {
 
     /** Talks to the receiver directly as a third device, to send requests a real engine never would. */
     private suspend fun <T> asIntruder(block: suspend (TransferClient, DeviceIdentity, Int) -> T): T {
-        val intruder = DeviceIdentity.loadOrCreate(File(root, "intruder.p12"), MemoryStore())
+        val intruder = DeviceIdentity.generate()
         val client = TransferClient(intruder.sslContext())
         return try {
             block(client, intruder, receiver.local.value.port!!)
@@ -245,6 +251,78 @@ class TransferEngineTest {
         }
         assertTrue(result is TransferClient.PrepareResult.Failed && "Pairing" in result.message, "$result")
         assertNull(receiver.incomingOffer.value)
+    }
+
+    /** Opens a pairing code on the receiver and returns it pointed at loopback, so no firewall is involved. */
+    private suspend fun openReceiverCode(): PairingLink {
+        receiver.showPairingQr()
+        val invite = withTimeout(5_000) { receiver.pairingInvite.filterNotNull().first() }
+        return PairingLink.parse(invite.uri)!!.copy(addresses = listOf("127.0.0.1"))
+    }
+
+    @Test
+    fun scanningAPairingCodeMakesBothDevicesTrustEachOther() = runBlocking {
+        val link = openReceiverCode()
+        sender.pairWithQr(link.toUri())
+
+        val request = withTimeout(15_000) { receiver.pairingInvite.mapNotNull { it?.request }.first() }
+        assertEquals(senderIdentity.fingerprint, request.fingerprint)
+        receiver.respondToPairingRequest(accept = true)
+
+        val state = withTimeout(15_000) {
+            sender.qrPairing.first { it is QrPairingState.Paired || it is QrPairingState.Failed }
+        }
+        assertEquals(QrPairingState.Paired("Receiver"), state)
+        assertEquals(receiverIdentity.fingerprint, sender.trustedDevices.value.single().fingerprint)
+        assertEquals(senderIdentity.fingerprint, receiver.trustedDevices.value.single().fingerprint)
+        assertTrue(sender.peers.value.single().trusted)
+        assertNull(receiver.pairingInvite.value)
+    }
+
+    @Test
+    fun pairingCodeIsSingleUseAndNeedsItsToken() = runBlocking {
+        val link = openReceiverCode()
+        val intruderRequest = { intruder: DeviceIdentity, token: String ->
+            QrPairRequest(DeviceInfo("intruder", "Intruder", DeviceType.DESKTOP, 1, fingerprint = intruder.fingerprint), token)
+        }
+        val wrongToken = asIntruder { client, intruder, port ->
+            client.pairByQr("127.0.0.1", port, receiverIdentity.fingerprint, intruderRequest(intruder, "00".repeat(16)))
+        }
+        assertTrue(wrongToken is TransferClient.QrPairResult.Failed, "$wrongToken")
+        assertNull(receiver.pairingInvite.value?.request)
+
+        sender.pairWithQr(link.toUri())
+        withTimeout(15_000) { receiver.pairingInvite.mapNotNull { it?.request }.first() }
+        receiver.respondToPairingRequest(accept = false)
+        val declined = withTimeout(15_000) { sender.qrPairing.first { it is QrPairingState.Failed } }
+        assertTrue("declined" in (declined as QrPairingState.Failed).message, declined.message)
+
+        val reused = asIntruder { client, intruder, port ->
+            client.pairByQr("127.0.0.1", port, receiverIdentity.fingerprint, intruderRequest(intruder, link.token))
+        }
+        assertTrue(reused is TransferClient.QrPairResult.Failed, "$reused")
+        assertTrue(receiver.trustedDevices.value.isEmpty())
+    }
+
+    @Test
+    fun programsFromATrustedDeviceStillNeedApproval() = runBlocking {
+        assertEquals(TransferStatus.COMPLETED, connectAndSend(listOf(sourceFile("one.txt", 100)), accept = true, trust = true))
+        receiver.setAutoAcceptTrusted(true)
+
+        // The responder declines, so DECLINED proves a prompt was shown instead of an automatic accept.
+        assertEquals(TransferStatus.DECLINED, connectAndSend(listOf(sourceFile("setup.exe", 100)), accept = false))
+        assertFalse(File(destDir, "setup.exe").exists())
+    }
+
+    @Test
+    fun resetIdentityServesTheNewKey() = runBlocking {
+        val before = receiver.local.value.fingerprint
+        receiver.resetIdentity()
+        val after = withTimeout(15_000) { receiver.local.first { it.fingerprint != before && it.serverRunning } }
+
+        val presented = asIntruder { client, _, port -> client.info("127.0.0.1", port) }
+        assertEquals(after.fingerprint.replace(" ", ""), presented.fingerprint)
+        assertNotEquals(receiverIdentity.fingerprint, presented.fingerprint)
     }
 
     @Test

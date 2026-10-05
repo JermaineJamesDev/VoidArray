@@ -8,6 +8,7 @@ import io.github.jermainejamesdev.voidarray.protocol.Params
 import io.github.jermainejamesdev.voidarray.protocol.PrepareRequest
 import io.github.jermainejamesdev.voidarray.protocol.PrepareResponse
 import io.github.jermainejamesdev.voidarray.protocol.ProtocolJson
+import io.github.jermainejamesdev.voidarray.protocol.QrPairRequest
 import io.github.jermainejamesdev.voidarray.protocol.Routes
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
@@ -98,6 +99,27 @@ internal class TransferClient(sslContext: SSLContext) {
         return response.decodeOrThrow()
     }
 
+    /**
+     * Presents a scanned pairing token. Blocks until the other device's user confirms, so the timeout
+     * outlasts that prompt. A device too old to know the route answers 404.
+     */
+    suspend fun pairByQr(host: String, port: Int, pin: String, request: QrPairRequest): QrPairResult {
+        val response = http.post(url(host, port, Routes.QR_PAIR)) {
+            pin(pin)
+            setBody(jsonBody(ProtocolJson.encodeToString(QrPairRequest.serializer(), request)))
+            timeout {
+                requestTimeoutMillis = PROMPT_TIMEOUT_MILLIS + 15_000
+                socketTimeoutMillis = PROMPT_TIMEOUT_MILLIS + 15_000
+            }
+        }
+        return when (response.status) {
+            HttpStatusCode.OK -> QrPairResult.Paired(response.decode<DeviceInfo>().requireMatchesPresentedKey(response, host))
+            HttpStatusCode.Forbidden -> QrPairResult.Declined
+            HttpStatusCode.NotFound -> QrPairResult.Failed("The other device needs a newer version of VoidArray to pair by QR code.")
+            else -> QrPairResult.Failed(response.errorMessage())
+        }
+    }
+
     /** Blocks until the receiver's user answers, so the request timeout must outlast the receiver's prompt. */
     suspend fun prepare(host: String, port: Int, pin: String, request: PrepareRequest): PrepareResult {
         val response = http.post(url(host, port, Routes.PREPARE)) {
@@ -180,6 +202,12 @@ internal class TransferClient(sslContext: SSLContext) {
                 }
             }
         }
+    }
+
+    sealed interface QrPairResult {
+        data class Paired(val info: DeviceInfo) : QrPairResult
+        data object Declined : QrPairResult
+        data class Failed(val message: String) : QrPairResult
     }
 
     sealed interface PrepareResult {

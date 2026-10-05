@@ -28,6 +28,8 @@ dependencies {
     implementation(libs.ktor.client.core)
     implementation(libs.ktor.client.okhttp)
     implementation(libs.ktor.tls.certificates)
+    // Encodes pairing QR codes; pure Java, so the same code serves Android and desktop.
+    implementation(libs.zxing.core)
 
     testImplementation(libs.kotlin.test)
 }
